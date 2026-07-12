@@ -24,7 +24,7 @@ Eval with its dashboard and development extras:
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\activate
-pip install --upgrade pip
+python -m pip install --upgrade pip
 pip install -e ".[dashboard,dev]"
 ```
 
