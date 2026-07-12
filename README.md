@@ -66,6 +66,7 @@ Eval with its dashboard and development extras:
 
 ```powershell
 py -3.12 -m venv .venv
+.\.venv\Scripts\activate
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install "conductor-core[providers]"
 .\.venv\Scripts\python.exe -m pip install -e ".[dashboard,dev]"
