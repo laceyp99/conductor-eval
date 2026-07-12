@@ -1681,7 +1681,7 @@ def create_app(run_path):
     app = dash.Dash(
         __name__,
         external_stylesheets=[dbc.themes.DARKLY],
-        title=f"LoopGPT Eval: {run_name}",
+        title=f"Conductor Eval: {run_name}",
     )
 
     # Build tab list conditionally based on run feature flags
@@ -1765,7 +1765,7 @@ def create_app(run_path):
                     dbc.Col(
                         [
                             html.H2(
-                                f"LoopGPT Evaluation: {run_name}",
+                                f"Conductor Evaluation: {run_name}",
                                 style={"color": PLOTLY_TEXT, "fontWeight": "bold"},
                             ),
                             html.P(
@@ -2233,7 +2233,7 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
 <html>
 <head>
     <meta charset="utf-8">
-    <title>LoopGPT Eval Dashboard: {run_name}</title>
+    <title>Conductor Eval Dashboard: {run_name}</title>
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <style>
         body {{ background-color: {PLOTLY_BG}; color: {PLOTLY_TEXT}; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; }}
@@ -2247,7 +2247,7 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
     </style>
 </head>
 <body>
-    <h1>LoopGPT Evaluation Dashboard: {run_name}</h1>
+    <h1>Conductor Evaluation Dashboard: {run_name}</h1>
     <p style="color: #666">Run: {timestamp} | {total} generations | {len(df["model"].unique())} models</p>
     <div class="stats">
         <div class="stat-card"><div class="label">Total</div><div class="value">{total}</div></div>
