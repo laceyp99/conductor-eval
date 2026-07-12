@@ -15,6 +15,23 @@ reasoning-mode differences across real models.
 | `checks.py` | MIDI validation functions (`scale_test`, `duration_test`) |
 | `analysis.py` | Interactive Plotly Dash dashboard (up to 8 tabs, up to 22 charts, global filters, export) |
 
+## Installation
+
+From the `conductor-eval` project directory, create a virtual environment,
+install a compatible published Core release with provider support, then install
+Eval with its dashboard and development extras:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\activate
+pip install --upgrade pip
+pip install -e ".[dashboard,dev]"
+```
+
+The explicit interpreter paths prevent `py -3.12 -m pip` from accidentally
+installing into the registered global Python instead of this environment.
+
+Key packages: `dash`, `dash-bootstrap-components`, `pandas`, `plotly`, `mido`, `rich`.
 
 ## Quick Start
 
@@ -57,25 +74,6 @@ name explicitly.
 ```
 
 The dashboard opens at `http://127.0.0.1:8050/`.
-
-## Installation
-
-From the `conductor-eval` project directory, create a virtual environment,
-install a compatible published Core release with provider support, then install
-Eval with its dashboard and development extras:
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\activate
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install "conductor-core[providers]"
-.\.venv\Scripts\python.exe -m pip install -e ".[dashboard,dev]"
-```
-
-The explicit interpreter paths prevent `py -3.12 -m pip` from accidentally
-installing into the registered global Python instead of this environment.
-
-Key packages: `dash`, `dash-bootstrap-components`, `pandas`, `plotly`, `mido`, `rich`.
 
 ---
 
