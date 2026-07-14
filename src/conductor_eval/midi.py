@@ -72,3 +72,42 @@ def extract_note_intervals(midi: MidiFile) -> list[NoteInterval]:
             note.pitch,
         ),
     )
+
+
+def calculate_polyphony_profile(midi: MidiFile) -> dict:
+    """Measure simultaneous completed notes across every MIDI track."""
+    intervals = extract_note_intervals(midi)
+    events = {}
+    for note in intervals:
+        events[note.start_tick] = events.get(note.start_tick, 0) + 1
+        events[note.end_tick] = events.get(note.end_tick, 0) - 1
+
+    active_notes = 0
+    max_polyphony = 0
+    previous_tick = 0
+    distribution_ticks = {}
+
+    for tick in sorted(events):
+        elapsed = tick - previous_tick
+        if elapsed:
+            distribution_ticks[active_notes] = distribution_ticks.get(active_notes, 0) + elapsed
+        active_notes += events[tick]
+        max_polyphony = max(max_polyphony, active_notes)
+        previous_tick = tick
+
+    total_duration_ticks = max((note.end_tick for note in intervals), default=0)
+    distribution = {
+        level: round(ticks / midi.ticks_per_beat, 4) for level, ticks in distribution_ticks.items()
+    }
+    percentages = {
+        level: round(ticks / total_duration_ticks * 100, 2)
+        for level, ticks in distribution_ticks.items()
+        if total_duration_ticks > 0
+    }
+    return {
+        "polyphony_distribution": distribution,
+        "polyphony_percentages": percentages,
+        "max_polyphony": max_polyphony,
+        "total_duration": round(total_duration_ticks / midi.ticks_per_beat, 4),
+        "ticks_per_beat": midi.ticks_per_beat,
+    }

@@ -24,7 +24,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
-from conductor_eval.checks import duration_test, scale_test
+from conductor_eval.checks import duration_test, monophony_test, polyphony_test, scale_test
 
 DIRECT_EVALUATION_CONFIRMATION = "RUN CLOUD EVALUATION"
 
@@ -125,6 +125,8 @@ class Evaluator:
     AVAILABLE_TESTS = {
         "scale": scale_test,
         "duration": duration_test,
+        "monophony": monophony_test,
+        "polyphony": polyphony_test,
     }
 
     def __init__(
@@ -170,6 +172,7 @@ class Evaluator:
         run_name: str = None,
         tests: list[str] = ["scale", "duration"],
         test_reasoning: bool = False,
+        test_params: dict[str, dict] | None = None,
     ) -> dict:
         """
         Run evaluation across all specified combinations.
@@ -182,6 +185,8 @@ class Evaluator:
             tests: List of test names to run (default: ["scale", "duration"]).
                    "scale" always runs. Others auto-detect params from prompt.
             test_reasoning: If True, test all thinking modes and effort levels for compatible models.
+            test_params: Explicit keyword arguments for named tests. Duration parameters override
+                         prompt detection; omitted duration parameters still use keyword detection.
 
         Returns:
             dict: Summary of evaluation results.
@@ -191,6 +196,8 @@ class Evaluator:
         """
         if run_name is None:
             raise ValueError("run_name is required")
+
+        test_params = self._validate_test_params(tests, test_params)
 
         # Normalize prompts to list
         if isinstance(prompts, str):
@@ -213,6 +220,7 @@ class Evaluator:
             "scales": self.SCALES,
             "models": [(p, m) for p, m in resolved_models],
             "tests": tests,
+            "test_params": test_params,
             "test_reasoning": test_reasoning,
             "temperature": self.temperature,
         }
@@ -226,6 +234,7 @@ class Evaluator:
             resolved_models=resolved_models,
             tests=tests,
             test_reasoning=test_reasoning,
+            test_params=test_params,
         )
         logger = logging.getLogger(__name__)
         logger.info(f"Starting evaluation '{run_name}' with {len(tasks)} total tasks")
@@ -257,7 +266,13 @@ class Evaluator:
         return summary
 
     def run_tests(
-        self, midi_data: MidiFile, root: str, scale: str, prompt: str, tests: list[str]
+        self,
+        midi_data: MidiFile,
+        root: str,
+        scale: str,
+        prompt: str,
+        tests: list[str],
+        test_params: dict[str, dict] | None = None,
     ) -> dict:
         """
         Run specified tests on MIDI data.
@@ -268,6 +283,7 @@ class Evaluator:
             scale: Scale used in generation.
             prompt: Original prompt (for parameter detection).
             tests: List of test names to run.
+            test_params: Explicit keyword arguments keyed by test name.
 
         Returns:
             dict: Test results with format:
@@ -279,6 +295,7 @@ class Evaluator:
         """
         results = {}
         all_passed = True
+        test_params = self._validate_test_params(tests, test_params)
 
         for test_name in tests:
             if test_name not in self.AVAILABLE_TESTS:
@@ -301,20 +318,21 @@ class Evaluator:
                     all_passed = False
 
             elif test_name == "duration":
-                # Duration test requires auto-detection from prompt
+                explicit_params = test_params.get(test_name, {})
                 detected_params = self._detect_test_params(prompt, test_name)
-                if "duration" not in detected_params:
+                resolved_params = {**detected_params, **explicit_params}
+                if "duration" not in resolved_params:
                     results[test_name] = {
                         "ran": False,
                         "skipped": "No duration keyword detected in prompt",
                     }
                 else:
                     try:
-                        duration_value = detected_params["duration"]
+                        duration_value = resolved_params["duration"]
                         test_result = test_func(midi_data, duration_value)
                         test_result["ran"] = True
                         test_result["params"] = {"duration": duration_value}
-                        test_result["detected_from_prompt"] = True
+                        test_result["detected_from_prompt"] = "duration" not in explicit_params
                         results[test_name] = test_result
                         if test_result.get("incorrect", 0) > 0:
                             all_passed = False
@@ -323,14 +341,14 @@ class Evaluator:
                         all_passed = False
 
             else:
-                # Future tests can be added here with their own logic
                 detected_params = self._detect_test_params(prompt, test_name)
+                resolved_params = {**detected_params, **test_params.get(test_name, {})}
                 try:
-                    test_result = test_func(midi_data, **detected_params)
+                    test_result = test_func(midi_data, **resolved_params)
                     test_result["ran"] = True
-                    test_result["params"] = detected_params
+                    test_result["params"] = resolved_params
                     results[test_name] = test_result
-                    if test_result.get("incorrect", 0) > 0:
+                    if not test_result.get("passed", test_result.get("incorrect", 0) == 0):
                         all_passed = False
                 except Exception as e:
                     results[test_name] = {"ran": False, "error": str(e)}
@@ -338,6 +356,25 @@ class Evaluator:
 
         results["overall_pass"] = all_passed
         return results
+
+    @staticmethod
+    def _validate_test_params(tests: list[str], test_params: dict[str, dict] | None) -> dict:
+        """Validate and copy explicit test arguments."""
+        if test_params is None:
+            return {}
+        if not isinstance(test_params, dict):
+            raise ValueError("test_params must be a dictionary keyed by test name")
+
+        unselected = sorted(set(test_params) - set(tests))
+        if unselected:
+            raise ValueError("test_params contains unselected tests: " + ", ".join(unselected))
+
+        validated = {}
+        for test_name, params in test_params.items():
+            if not isinstance(params, dict):
+                raise ValueError(f"test_params[{test_name!r}] must be a dictionary")
+            validated[test_name] = dict(params)
+        return validated
 
     def _resolve_models(self, models: Union[str, list[str]]) -> list[tuple[str, str]]:
         """
@@ -488,6 +525,7 @@ class Evaluator:
         resolved_models: list[tuple[str, str]],
         tests: list[str],
         test_reasoning: bool,
+        test_params: dict[str, dict] | None = None,
     ) -> list[dict]:
         """
         Generate all task combinations to run.
@@ -498,6 +536,7 @@ class Evaluator:
             resolved_models: List of (provider, model) tuples
             tests: List of test names
             test_reasoning: Whether to test reasoning variations
+            test_params: Explicit keyword arguments keyed by test name
 
         Returns:
             list: List of task dictionaries
@@ -528,6 +567,10 @@ class Evaluator:
                                     "use_thinking": variation["use_thinking"],
                                     "effort": variation["effort"],
                                     "variation_name": variation["name"],
+                                    "test_params": {
+                                        name: dict(params)
+                                        for name, params in (test_params or {}).items()
+                                    },
                                 }
                             )
 
@@ -872,6 +915,7 @@ class Evaluator:
             scale=scale,
             prompt=original_prompt,
             tests=tests_to_run,
+            test_params=task.get("test_params"),
         )
         result["tests"] = test_results
 
