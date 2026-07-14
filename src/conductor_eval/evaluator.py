@@ -24,7 +24,15 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
-from conductor_eval.checks import duration_test, monophony_test, polyphony_test, scale_test
+from conductor_eval.checks import (
+    chord_event_positions_test,
+    chord_progression_test,
+    duration_test,
+    harmonic_rhythm_test,
+    monophony_test,
+    polyphony_test,
+    scale_test,
+)
 
 DIRECT_EVALUATION_CONFIRMATION = "RUN CLOUD EVALUATION"
 
@@ -127,6 +135,9 @@ class Evaluator:
         "duration": duration_test,
         "monophony": monophony_test,
         "polyphony": polyphony_test,
+        "chord_progression": chord_progression_test,
+        "harmonic_rhythm": harmonic_rhythm_test,
+        "chord_event_positions": chord_event_positions_test,
     }
 
     def __init__(
@@ -343,6 +354,8 @@ class Evaluator:
             else:
                 detected_params = self._detect_test_params(prompt, test_name)
                 resolved_params = {**detected_params, **test_params.get(test_name, {})}
+                if test_name == "chord_progression":
+                    resolved_params.update({"root": root, "scale": scale})
                 try:
                     test_result = test_func(midi_data, **resolved_params)
                     test_result["ran"] = True

@@ -1,6 +1,35 @@
+import pytest
 from mido import Message, MidiFile, MidiTrack
 
-from conductor_eval.midi import calculate_polyphony_profile, extract_note_intervals
+from conductor_eval.midi import (
+    beats_to_ticks,
+    calculate_polyphony_profile,
+    extract_note_intervals,
+    ticks_to_beats,
+)
+
+
+def test_beat_tick_conversions_round_trip():
+    assert beats_to_ticks(1.5, 480) == 720
+    assert ticks_to_beats(720, 480) == 1.5
+
+
+@pytest.mark.parametrize("beats", [True, -1, 1 / 7])
+def test_beats_to_ticks_rejects_invalid_or_inexact_values(beats):
+    with pytest.raises(ValueError, match="beats"):
+        beats_to_ticks(beats, 480)
+
+
+@pytest.mark.parametrize("ticks", [True, -1, 1.5])
+def test_ticks_to_beats_rejects_non_integer_ticks(ticks):
+    with pytest.raises(ValueError, match="ticks"):
+        ticks_to_beats(ticks, 480)
+
+
+@pytest.mark.parametrize("ticks_per_beat", [True, 0, -480, 480.0])
+def test_beat_tick_conversions_require_positive_integer_resolution(ticks_per_beat):
+    with pytest.raises(ValueError, match="ticks_per_beat"):
+        beats_to_ticks(1, ticks_per_beat)
 
 
 def test_extract_note_intervals_uses_absolute_time_across_tracks():

@@ -12,6 +12,14 @@ def test_texture_checks_are_available():
     assert {"monophony", "polyphony"} <= Evaluator.AVAILABLE_TESTS.keys()
 
 
+def test_harmonic_checks_are_available():
+    assert {
+        "chord_progression",
+        "harmonic_rhythm",
+        "chord_event_positions",
+    } <= Evaluator.AVAILABLE_TESTS.keys()
+
+
 class RecordingEngine:
     def __init__(self, result):
         self.result = result
@@ -112,6 +120,40 @@ def test_run_tests_routes_polyphony_params_and_updates_overall_pass(tmp_path):
     assert results["polyphony"]["params"] == {"min_voices": 3}
     assert results["polyphony"]["passed"] is False
     assert results["overall_pass"] is False
+
+
+def test_run_tests_injects_root_and_scale_into_chord_progression(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    midi = MidiFile(ticks_per_beat=480)
+    track = midi.add_track()
+    for pitch in [60, 64, 67]:
+        track.append(Message("note_on", note=pitch, velocity=80, time=0))
+    track.append(Message("note_off", note=60, velocity=0, time=480))
+    track.append(Message("note_off", note=64, velocity=0, time=0))
+    track.append(Message("note_off", note=67, velocity=0, time=0))
+
+    results = evaluator.run_tests(
+        midi_data=midi,
+        root="C",
+        scale="major",
+        prompt="one C major chord",
+        tests=["chord_progression"],
+        test_params={
+            "chord_progression": {
+                "progression": ["I"],
+                "beats_per_chord": 1,
+            }
+        },
+    )
+
+    assert results["chord_progression"]["passed"] is True
+    assert results["chord_progression"]["params"] == {
+        "progression": ["I"],
+        "beats_per_chord": 1,
+        "root": "C",
+        "scale": "major",
+    }
+    assert results["overall_pass"] is True
 
 
 def test_run_tests_uses_explicit_duration_before_prompt_detection(tmp_path):

@@ -23,6 +23,35 @@ class NoteInterval:
         return self.end_tick - self.start_tick
 
 
+def _validate_ticks_per_beat(ticks_per_beat: int) -> None:
+    """Validate the MIDI resolution used for beat/tick conversion."""
+    if (
+        not isinstance(ticks_per_beat, int)
+        or isinstance(ticks_per_beat, bool)
+        or ticks_per_beat <= 0
+    ):
+        raise ValueError("ticks_per_beat must be a positive integer")
+
+
+def beats_to_ticks(beats, ticks_per_beat: int, parameter_name="beats") -> int:
+    """Convert a non-negative beat value to an exact MIDI tick."""
+    _validate_ticks_per_beat(ticks_per_beat)
+    if not isinstance(beats, (int, float)) or isinstance(beats, bool) or beats < 0:
+        raise ValueError(f"{parameter_name} values must be non-negative numbers")
+    ticks = beats * ticks_per_beat
+    if isinstance(ticks, float) and not ticks.is_integer():
+        raise ValueError(f"{parameter_name} values must resolve to whole MIDI ticks")
+    return int(ticks)
+
+
+def ticks_to_beats(ticks, ticks_per_beat: int, parameter_name="ticks") -> float:
+    """Convert a non-negative integer MIDI tick to beats."""
+    _validate_ticks_per_beat(ticks_per_beat)
+    if not isinstance(ticks, int) or isinstance(ticks, bool) or ticks < 0:
+        raise ValueError(f"{parameter_name} values must be non-negative integers")
+    return ticks / ticks_per_beat
+
+
 def extract_note_intervals(midi: MidiFile) -> list[NoteInterval]:
     """Return completed notes from every track on one absolute-tick timeline.
 
@@ -97,7 +126,8 @@ def calculate_polyphony_profile(midi: MidiFile) -> dict:
 
     total_duration_ticks = max((note.end_tick for note in intervals), default=0)
     distribution = {
-        level: round(ticks / midi.ticks_per_beat, 4) for level, ticks in distribution_ticks.items()
+        level: round(ticks_to_beats(ticks, midi.ticks_per_beat), 4)
+        for level, ticks in distribution_ticks.items()
     }
     percentages = {
         level: round(ticks / total_duration_ticks * 100, 2)
@@ -108,6 +138,6 @@ def calculate_polyphony_profile(midi: MidiFile) -> dict:
         "polyphony_distribution": distribution,
         "polyphony_percentages": percentages,
         "max_polyphony": max_polyphony,
-        "total_duration": round(total_duration_ticks / midi.ticks_per_beat, 4),
+        "total_duration": round(ticks_to_beats(total_duration_ticks, midi.ticks_per_beat), 4),
         "ticks_per_beat": midi.ticks_per_beat,
     }
