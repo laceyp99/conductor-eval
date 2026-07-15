@@ -472,74 +472,118 @@ def build_pass_rate_by_model(df):
     return apply_plotly_theme(fig)
 
 
-def build_per_test_breakdown(df):
-    """Build grouped bar chart showing scale vs duration pass rate per model.
-
-    Args:
-        df (pd.DataFrame): Filtered results DataFrame.
-
-    Returns:
-        go.Figure: Grouped bar chart figure.
-    """
-    if df.empty:
-        return apply_plotly_theme(go.Figure().update_layout(title="No data"))
-
-    # Only include rows where tests actually ran
-    models = sorted(df["model"].unique())
-    scale_rates = []
-    duration_rates = []
-    overall_rates = []
-
-    for model in models:
-        mdf = df[df["model"] == model]
-        # Scale pass rate (only where scale test ran)
-        scale_df = mdf[mdf["scale_ran"]]
-        s_rate = (scale_df["scale_pass"].sum() / len(scale_df) * 100) if len(scale_df) > 0 else 0
-        scale_rates.append(round(s_rate, 1))
-        # Duration pass rate
-        dur_df = mdf[mdf["duration_ran"]]
-        d_rate = (dur_df["duration_pass"].sum() / len(dur_df) * 100) if len(dur_df) > 0 else 0
-        duration_rates.append(round(d_rate, 1))
-        # Overall
-        o_rate = (mdf["overall_pass"].sum() / len(mdf) * 100) if len(mdf) > 0 else 0
-        overall_rates.append(round(o_rate, 1))
-
+def _empty_performance_figure(title, message):
+    """Build a themed empty state for a model-performance section."""
     fig = go.Figure()
+    fig.add_annotation(
+        text=message,
+        x=0.5,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        font=dict(color=PLOTLY_TEXT, size=14),
+    )
+    fig.update_layout(title=title, xaxis=dict(visible=False), yaxis=dict(visible=False))
+    return apply_plotly_theme(fig)
+
+
+def _add_check_pass_rate_trace(fig, eligible, pass_column, trace_name):
+    """Add one passed/executed model trace from rows where a check ran."""
+    if eligible.empty:
+        return
+
+    stats = (
+        eligible.groupby("model")[pass_column]
+        .agg(tested="count", passed="sum")
+        .reset_index()
+        .sort_values("model")
+    )
+    stats["pass_rate"] = (stats["passed"] / stats["tested"] * 100).round(1)
+    labels = [
+        f"{rate}% ({int(passed)}/{int(tested)})"
+        for rate, passed, tested in zip(stats["pass_rate"], stats["passed"], stats["tested"])
+    ]
     fig.add_trace(
         go.Bar(
-            name="Scale Test",
-            x=models,
-            y=scale_rates,
-            text=scale_rates,
+            name=trace_name,
+            x=stats["model"],
+            y=stats["pass_rate"],
+            text=labels,
             textposition="auto",
+            customdata=list(zip(stats["passed"].astype(int), stats["tested"].astype(int))),
+            hovertemplate=(
+                "Model: %{x}<br>"
+                + f"Check: {trace_name}<br>"
+                + "Pass rate: %{y:.1f}%<br>Passed: %{customdata[0]}<br>"
+                + "Executed: %{customdata[1]}<extra></extra>"
+            ),
         )
     )
-    fig.add_trace(
-        go.Bar(
-            name="Duration Test",
-            x=models,
-            y=duration_rates,
-            text=duration_rates,
-            textposition="auto",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            name="Overall (Both)",
-            x=models,
-            y=overall_rates,
-            text=overall_rates,
-            textposition="auto",
-        )
-    )
+
+
+def _finish_check_pass_rate_figure(fig, title):
+    """Apply the shared grouped pass-rate layout."""
     fig.update_layout(
         barmode="group",
-        title="Pass Rate by Test Type per Model",
+        title=title,
         xaxis_title="Model",
         yaxis_title="Pass Rate (%)",
         yaxis=dict(range=[0, 105]),
     )
     return apply_plotly_theme(fig)
+
+
+def build_duration_adherence_by_model(df):
+    """Build duration pass rates by model for quarter- and eighth-note cases."""
+    title = "Duration Adherence by Model and Note Length"
+    eligible = df[df["duration_ran"] & df["duration_param"].isin(["quarter", "eighth"])]
+    if eligible.empty:
+        return _empty_performance_figure(title, "No quarter- or eighth-note duration data")
+
+    fig = go.Figure()
+    for duration, label in (("quarter", "Quarter Notes"), ("eighth", "Eighth Notes")):
+        _add_check_pass_rate_trace(
+            fig,
+            eligible[eligible["duration_param"] == duration],
+            "duration_pass",
+            label,
+        )
+    return _finish_check_pass_rate_figure(fig, title)
+
+
+def build_texture_performance_by_model(df):
+    """Build monophony and polyphony pass rates from eligible generations."""
+    title = "Texture Performance by Model"
+    if not (df["monophony_ran"].any() or df["polyphony_ran"].any()):
+        return _empty_performance_figure(title, "No texture checks ran")
+
+    fig = go.Figure()
+    _add_check_pass_rate_trace(fig, df[df["monophony_ran"]], "monophony_pass", "Monophony")
+    _add_check_pass_rate_trace(fig, df[df["polyphony_ran"]], "polyphony_pass", "Polyphony")
+    return _finish_check_pass_rate_figure(fig, title)
+
+
+def build_chord_performance_by_model(df):
+    """Build chord identity, harmonic rhythm, and event-position pass rates."""
+    title = "Chord Performance by Model"
+    checks = (
+        ("chord_progression", "Chord Progression"),
+        ("harmonic_rhythm", "Harmonic Rhythm"),
+        ("chord_event_positions", "Event Positions"),
+    )
+    if not any(df[f"{check}_ran"].any() for check, _ in checks):
+        return _empty_performance_figure(title, "No chord checks ran")
+
+    fig = go.Figure()
+    for check, label in checks:
+        _add_check_pass_rate_trace(
+            fig,
+            df[df[f"{check}_ran"]],
+            f"{check}_pass",
+            label,
+        )
+    return _finish_check_pass_rate_figure(fig, title)
 
 
 def build_model_root_heatmap(df):
@@ -571,40 +615,6 @@ def build_model_root_heatmap(df):
         )
     )
     fig.update_layout(title="Pass Rate: Model x Root", xaxis_title="Root", yaxis_title="Model")
-    return apply_plotly_theme(fig)
-
-
-def build_model_scale_heatmap(df):
-    """Build heatmap of pass rate at each (model, scale) intersection.
-
-    Args:
-        df (pd.DataFrame): Filtered results DataFrame.
-
-    Returns:
-        go.Figure: Heatmap figure.
-    """
-    if df.empty:
-        return apply_plotly_theme(go.Figure().update_layout(title="No data"))
-
-    pivot = df.pivot_table(values="overall_pass", index="model", columns="scale", aggfunc="mean")
-    pivot = (pivot * 100).round(1)
-
-    fig = go.Figure(
-        go.Heatmap(
-            z=pivot.values,
-            x=pivot.columns.tolist(),
-            y=pivot.index.tolist(),
-            text=pivot.values,
-            texttemplate="%{text:.1f}%",
-            colorscale="RdYlGn",
-            zmin=0,
-            zmax=100,
-            colorbar=dict(title="Pass %"),
-        )
-    )
-    fig.update_layout(
-        title="Pass Rate: Model x Scale", xaxis_title="Scale Type", yaxis_title="Model"
-    )
     return apply_plotly_theme(fig)
 
 
@@ -1945,17 +1955,28 @@ def create_app(run_path):
             [
                 dbc.Row(
                     [
-                        dbc.Col(dcc.Graph(figure=build_per_test_breakdown(filtered)), md=12),
-                    ],
-                    className="mb-3",
-                ),
-                dbc.Row(
-                    [
+                        dbc.Col(
+                            dcc.Graph(figure=build_duration_adherence_by_model(filtered)),
+                            md=6,
+                        ),
                         dbc.Col(
                             dcc.Graph(figure=build_major_vs_minor_by_model(filtered)),
                             md=6,
                         ),
-                        dbc.Col(dcc.Graph(figure=build_model_scale_heatmap(filtered)), md=6),
+                    ],
+                    className="mb-3",
+                ),
+                html.H4("Texture and Chord Performance", style={"color": PLOTLY_TEXT}),
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            dcc.Graph(figure=build_texture_performance_by_model(filtered)),
+                            md=6,
+                        ),
+                        dbc.Col(
+                            dcc.Graph(figure=build_chord_performance_by_model(filtered)),
+                            md=6,
+                        ),
                     ],
                     className="mb-3",
                 ),
@@ -2227,9 +2248,10 @@ def create_app(run_path):
         # Build all figures with the full (unfiltered) dataset
         figures = {
             "pass_rate_by_model": build_pass_rate_by_model(df),
-            "per_test_breakdown": build_per_test_breakdown(df),
+            "duration_adherence": build_duration_adherence_by_model(df),
+            "texture_performance": build_texture_performance_by_model(df),
+            "chord_performance": build_chord_performance_by_model(df),
             "model_root_heatmap": build_model_root_heatmap(df),
-            "model_scale_heatmap": build_model_scale_heatmap(df),
             "major_vs_minor": build_major_vs_minor_by_model(df),
             "root_pass_rate": build_root_pass_rate(df),
             "root_scale_grouped": build_root_scale_grouped(df),

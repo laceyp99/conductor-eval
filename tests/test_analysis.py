@@ -1,6 +1,13 @@
 import json
 
-from conductor_eval.analysis import load_run
+import pandas as pd
+
+from conductor_eval.analysis import (
+    build_chord_performance_by_model,
+    build_duration_adherence_by_model,
+    build_texture_performance_by_model,
+    load_run,
+)
 
 
 def _write_run(tmp_path, tests):
@@ -115,3 +122,93 @@ def test_load_run_treats_missing_and_not_run_checks_as_ineligible(tmp_path):
     assert row["chord_progression_failed_bars"] == []
     assert row["scale_pass"]
     assert row["duration_pass"]
+
+
+def test_duration_adherence_groups_by_note_length_and_excludes_not_run_rows():
+    df = pd.DataFrame(
+        [
+            {
+                "model": "alpha",
+                "duration_ran": True,
+                "duration_param": "quarter",
+                "duration_pass": True,
+            },
+            {
+                "model": "alpha",
+                "duration_ran": False,
+                "duration_param": "quarter",
+                "duration_pass": False,
+            },
+            {
+                "model": "alpha",
+                "duration_ran": True,
+                "duration_param": "eighth",
+                "duration_pass": False,
+            },
+            {
+                "model": "beta",
+                "duration_ran": True,
+                "duration_param": "quarter",
+                "duration_pass": False,
+            },
+        ]
+    )
+
+    fig = build_duration_adherence_by_model(df)
+
+    assert [trace.name for trace in fig.data] == ["Quarter Notes", "Eighth Notes"]
+    quarter = fig.data[0]
+    assert list(quarter.x) == ["alpha", "beta"]
+    assert list(quarter.y) == [100.0, 0.0]
+    assert [list(counts) for counts in quarter.customdata] == [[1, 1], [0, 1]]
+    assert list(fig.data[1].y) == [0.0]
+
+
+def test_texture_performance_uses_each_checks_eligible_rows():
+    df = pd.DataFrame(
+        [
+            {
+                "model": "alpha",
+                "monophony_ran": True,
+                "monophony_pass": True,
+                "polyphony_ran": False,
+                "polyphony_pass": False,
+            },
+            {
+                "model": "beta",
+                "monophony_ran": False,
+                "monophony_pass": False,
+                "polyphony_ran": True,
+                "polyphony_pass": False,
+            },
+        ]
+    )
+
+    fig = build_texture_performance_by_model(df)
+
+    assert [trace.name for trace in fig.data] == ["Monophony", "Polyphony"]
+    assert list(fig.data[0].x) == ["alpha"]
+    assert list(fig.data[0].y) == [100.0]
+    assert list(fig.data[1].x) == ["beta"]
+    assert list(fig.data[1].y) == [0.0]
+
+
+def test_chord_performance_has_empty_state_when_no_chord_checks_ran():
+    df = pd.DataFrame(
+        [
+            {
+                "model": "alpha",
+                "chord_progression_ran": False,
+                "chord_progression_pass": False,
+                "harmonic_rhythm_ran": False,
+                "harmonic_rhythm_pass": False,
+                "chord_event_positions_ran": False,
+                "chord_event_positions_pass": False,
+            }
+        ]
+    )
+
+    fig = build_chord_performance_by_model(df)
+
+    assert not fig.data
+    assert fig.layout.annotations[0].text == "No chord checks ran"
