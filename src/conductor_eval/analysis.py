@@ -191,6 +191,11 @@ def load_run(run_path):
         # Scale test details
         scale_test = tests.get("scale", {})
         duration_test = tests.get("duration", {})
+        monophony_test = tests.get("monophony", {})
+        polyphony_test = tests.get("polyphony", {})
+        chord_progression_test = tests.get("chord_progression", {})
+        harmonic_rhythm_test = tests.get("harmonic_rhythm", {})
+        chord_event_positions_test = tests.get("chord_event_positions", {})
 
         row = {
             "model": result.get("model", "unknown"),
@@ -224,6 +229,39 @@ def load_run(run_path):
             "duration_incorrect": duration_test.get("incorrect", 0),
             "duration_lengths": duration_test.get("lengths", {}),
             "duration_param": duration_test.get("params", {}).get("duration", ""),
+            # Texture tests
+            "monophony_ran": monophony_test.get("ran", False),
+            "monophony_pass": monophony_test.get("passed", False),
+            "monophony_max_polyphony": monophony_test.get("max_polyphony", 0),
+            "monophony_distribution": monophony_test.get("polyphony_distribution", {}),
+            "monophony_percentages": monophony_test.get("polyphony_percentages", {}),
+            "polyphony_ran": polyphony_test.get("ran", False),
+            "polyphony_pass": polyphony_test.get("passed", False),
+            "polyphony_max_polyphony": polyphony_test.get("max_polyphony", 0),
+            "polyphony_min_voices": polyphony_test.get("params", {}).get(
+                "min_voices", polyphony_test.get("min_voices")
+            ),
+            "polyphony_distribution": polyphony_test.get("polyphony_distribution", {}),
+            "polyphony_percentages": polyphony_test.get("polyphony_percentages", {}),
+            # Chord identity test
+            "chord_progression_ran": chord_progression_test.get("ran", False),
+            "chord_progression_pass": chord_progression_test.get("passed", False),
+            "chord_progression_params": chord_progression_test.get("params", {}),
+            "chord_progression_bars": chord_progression_test.get("bars", []),
+            # Harmonic rhythm test
+            "harmonic_rhythm_ran": harmonic_rhythm_test.get("ran", False),
+            "harmonic_rhythm_pass": harmonic_rhythm_test.get("passed", False),
+            "harmonic_rhythm_missing_onsets": harmonic_rhythm_test.get("missing_onsets", []),
+            "harmonic_rhythm_unexpected_onsets": harmonic_rhythm_test.get("unexpected_onsets", []),
+            # Chord event-position test
+            "chord_event_positions_ran": chord_event_positions_test.get("ran", False),
+            "chord_event_positions_pass": chord_event_positions_test.get("passed", False),
+            "chord_event_positions_missing": chord_event_positions_test.get(
+                "missing_positions", []
+            ),
+            "chord_event_positions_unexpected": chord_event_positions_test.get(
+                "unexpected_positions", []
+            ),
         }
         rows.append(row)
 
@@ -244,6 +282,31 @@ def load_run(run_path):
         df["scale_pass"] = df.apply(lambda r: r["scale_incorrect"] == 0 and r["scale_ran"], axis=1)
         df["duration_pass"] = df.apply(
             lambda r: r["duration_incorrect"] == 0 and r["duration_ran"], axis=1
+        )
+        for test_name in (
+            "monophony",
+            "polyphony",
+            "chord_progression",
+            "harmonic_rhythm",
+            "chord_event_positions",
+        ):
+            df[f"{test_name}_pass"] = df[f"{test_name}_ran"] & df[f"{test_name}_pass"].fillna(False)
+
+        df["polyphony_voice_shortfall"] = df.apply(
+            lambda r: (
+                max(r["polyphony_min_voices"] - r["polyphony_max_polyphony"], 0)
+                if r["polyphony_ran"] and pd.notna(r["polyphony_min_voices"])
+                else None
+            ),
+            axis=1,
+        )
+        df["chord_progression_failed_bars"] = df.apply(
+            lambda r: (
+                [bar for bar in r["chord_progression_bars"] if not bar.get("passed", False)]
+                if r["chord_progression_ran"]
+                else []
+            ),
+            axis=1,
         )
 
         # Build model instance names when reasoning is being tested.
@@ -360,6 +423,32 @@ def apply_filters(df, models, roots, scales, variations):
     return filtered
 
 
+def _rate_labels_and_counts(rates, numerators, denominators):
+    """Return consistent rate labels and Plotly customdata count pairs."""
+    labels = [
+        f"{rate:.1f}% ({int(numerator)}/{int(denominator)})"
+        for rate, numerator, denominator in zip(rates, numerators, denominators)
+    ]
+    counts = list(zip(pd.Series(numerators).astype(int), pd.Series(denominators).astype(int)))
+    return labels, counts
+
+
+def _rate_hover_template(
+    category_label,
+    *,
+    rate_label="Pass rate",
+    numerator_label="Passed",
+    denominator_label="Executed",
+    rate_value="%{y:.1f}",
+):
+    """Build shared hover text for aggregate rate charts."""
+    return (
+        f"{category_label}<br>{rate_label}: {rate_value}%<br>"
+        f"{numerator_label}: %{{customdata[0]}}<br>"
+        f"{denominator_label}: %{{customdata[1]}}<extra></extra>"
+    )
+
+
 def build_pass_rate_by_model(df):
     """Build horizontal bar chart of overall pass rate by model.
 
@@ -382,21 +471,19 @@ def build_pass_rate_by_model(df):
     )
     stats["pass_rate"] = (stats["passed"] / stats["tested"] * 100).round(1)
     stats = stats.sort_values("pass_rate", ascending=True)
+    labels, counts = _rate_labels_and_counts(stats["pass_rate"], stats["passed"], stats["tested"])
 
     fig = go.Figure(
         go.Bar(
             x=stats["pass_rate"],
             y=stats["model"],
             orientation="h",
-            text=[
-                f"{r}% ({p}/{t})"
-                for r, p, t in zip(
-                    stats["pass_rate"],
-                    stats["passed"].astype(int),
-                    stats["tested"].astype(int),
-                )
-            ],
+            text=labels,
             textposition="auto",
+            customdata=counts,
+            hovertemplate=_rate_hover_template(
+                "Model: %{y}", rate_value="%{x:.1f}", denominator_label="Generations"
+            ),
             marker_color=[MODEL_COLORS[i % len(MODEL_COLORS)] for i in range(len(stats))],
         )
     )
@@ -409,74 +496,112 @@ def build_pass_rate_by_model(df):
     return apply_plotly_theme(fig)
 
 
-def build_per_test_breakdown(df):
-    """Build grouped bar chart showing scale vs duration pass rate per model.
-
-    Args:
-        df (pd.DataFrame): Filtered results DataFrame.
-
-    Returns:
-        go.Figure: Grouped bar chart figure.
-    """
-    if df.empty:
-        return apply_plotly_theme(go.Figure().update_layout(title="No data"))
-
-    # Only include rows where tests actually ran
-    models = sorted(df["model"].unique())
-    scale_rates = []
-    duration_rates = []
-    overall_rates = []
-
-    for model in models:
-        mdf = df[df["model"] == model]
-        # Scale pass rate (only where scale test ran)
-        scale_df = mdf[mdf["scale_ran"]]
-        s_rate = (scale_df["scale_pass"].sum() / len(scale_df) * 100) if len(scale_df) > 0 else 0
-        scale_rates.append(round(s_rate, 1))
-        # Duration pass rate
-        dur_df = mdf[mdf["duration_ran"]]
-        d_rate = (dur_df["duration_pass"].sum() / len(dur_df) * 100) if len(dur_df) > 0 else 0
-        duration_rates.append(round(d_rate, 1))
-        # Overall
-        o_rate = (mdf["overall_pass"].sum() / len(mdf) * 100) if len(mdf) > 0 else 0
-        overall_rates.append(round(o_rate, 1))
-
+def _empty_performance_figure(title, message):
+    """Build a themed empty state for a model-performance section."""
     fig = go.Figure()
+    fig.add_annotation(
+        text=message,
+        x=0.5,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        font=dict(color=PLOTLY_TEXT, size=14),
+    )
+    fig.update_layout(title=title, xaxis=dict(visible=False), yaxis=dict(visible=False))
+    return apply_plotly_theme(fig)
+
+
+def _add_check_pass_rate_trace(fig, eligible, pass_column, trace_name):
+    """Add one passed/executed model trace from rows where a check ran."""
+    if eligible.empty:
+        return
+
+    stats = (
+        eligible.groupby("model")[pass_column]
+        .agg(tested="count", passed="sum")
+        .reset_index()
+        .sort_values("model")
+    )
+    stats["pass_rate"] = (stats["passed"] / stats["tested"] * 100).round(1)
+    labels, counts = _rate_labels_and_counts(stats["pass_rate"], stats["passed"], stats["tested"])
     fig.add_trace(
         go.Bar(
-            name="Scale Test",
-            x=models,
-            y=scale_rates,
-            text=scale_rates,
+            name=trace_name,
+            x=stats["model"],
+            y=stats["pass_rate"],
+            text=labels,
             textposition="auto",
+            customdata=counts,
+            hovertemplate=_rate_hover_template(
+                f"Model: %{{x}}<br>Check: {trace_name}",
+            ),
         )
     )
-    fig.add_trace(
-        go.Bar(
-            name="Duration Test",
-            x=models,
-            y=duration_rates,
-            text=duration_rates,
-            textposition="auto",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            name="Overall (Both)",
-            x=models,
-            y=overall_rates,
-            text=overall_rates,
-            textposition="auto",
-        )
-    )
+
+
+def _finish_check_pass_rate_figure(fig, title):
+    """Apply the shared grouped pass-rate layout."""
     fig.update_layout(
         barmode="group",
-        title="Pass Rate by Test Type per Model",
+        title=title,
         xaxis_title="Model",
         yaxis_title="Pass Rate (%)",
         yaxis=dict(range=[0, 105]),
     )
     return apply_plotly_theme(fig)
+
+
+def build_duration_adherence_by_model(df):
+    """Build duration pass rates by model for quarter- and eighth-note cases."""
+    title = "Duration Adherence by Model and Note Length"
+    eligible = df[df["duration_ran"] & df["duration_param"].isin(["quarter", "eighth"])]
+    if eligible.empty:
+        return _empty_performance_figure(title, "No quarter- or eighth-note duration data")
+
+    fig = go.Figure()
+    for duration, label in (("quarter", "Quarter Notes"), ("eighth", "Eighth Notes")):
+        _add_check_pass_rate_trace(
+            fig,
+            eligible[eligible["duration_param"] == duration],
+            "duration_pass",
+            label,
+        )
+    return _finish_check_pass_rate_figure(fig, title)
+
+
+def build_texture_performance_by_model(df):
+    """Build monophony and polyphony pass rates from eligible generations."""
+    title = "Texture Performance by Model"
+    if not (df["monophony_ran"].any() or df["polyphony_ran"].any()):
+        return _empty_performance_figure(title, "No texture checks ran")
+
+    fig = go.Figure()
+    _add_check_pass_rate_trace(fig, df[df["monophony_ran"]], "monophony_pass", "Monophony")
+    _add_check_pass_rate_trace(fig, df[df["polyphony_ran"]], "polyphony_pass", "Polyphony")
+    return _finish_check_pass_rate_figure(fig, title)
+
+
+def build_chord_performance_by_model(df):
+    """Build chord identity, harmonic rhythm, and event-position pass rates."""
+    title = "Chord Performance by Model"
+    checks = (
+        ("chord_progression", "Chord Progression"),
+        ("harmonic_rhythm", "Harmonic Rhythm"),
+        ("chord_event_positions", "Event Positions"),
+    )
+    if not any(df[f"{check}_ran"].any() for check, _ in checks):
+        return _empty_performance_figure(title, "No chord checks ran")
+
+    fig = go.Figure()
+    for check, label in checks:
+        _add_check_pass_rate_trace(
+            fig,
+            df[df[f"{check}_ran"]],
+            f"{check}_pass",
+            label,
+        )
+    return _finish_check_pass_rate_figure(fig, title)
 
 
 def build_model_root_heatmap(df):
@@ -491,8 +616,26 @@ def build_model_root_heatmap(df):
     if df.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
-    pivot = df.pivot_table(values="overall_pass", index="model", columns="root", aggfunc="mean")
-    pivot = (pivot * 100).round(1)
+    grouped = (
+        df.groupby(["model", "root"])["overall_pass"]
+        .agg(passed="sum", tested="count")
+        .reset_index()
+    )
+    grouped["pass_rate"] = (grouped["passed"] / grouped["tested"] * 100).round(1)
+    pivot = grouped.pivot(index="model", columns="root", values="pass_rate")
+    passed = (
+        grouped.pivot(index="model", columns="root", values="passed").reindex_like(pivot).fillna(0)
+    )
+    tested = (
+        grouped.pivot(index="model", columns="root", values="tested").reindex_like(pivot).fillna(0)
+    )
+    counts = [
+        [
+            [int(passed.iloc[row, col]), int(tested.iloc[row, col])]
+            for col in range(len(pivot.columns))
+        ]
+        for row in range(len(pivot.index))
+    ]
 
     fig = go.Figure(
         go.Heatmap(
@@ -501,6 +644,10 @@ def build_model_root_heatmap(df):
             y=pivot.index.tolist(),
             text=pivot.values,
             texttemplate="%{text:.1f}%",
+            customdata=counts,
+            hovertemplate=_rate_hover_template(
+                "Model: %{y}<br>Root: %{x}", denominator_label="Generations", rate_value="%{z:.1f}"
+            ),
             colorscale="RdYlGn",
             zmin=0,
             zmax=100,
@@ -508,40 +655,6 @@ def build_model_root_heatmap(df):
         )
     )
     fig.update_layout(title="Pass Rate: Model x Root", xaxis_title="Root", yaxis_title="Model")
-    return apply_plotly_theme(fig)
-
-
-def build_model_scale_heatmap(df):
-    """Build heatmap of pass rate at each (model, scale) intersection.
-
-    Args:
-        df (pd.DataFrame): Filtered results DataFrame.
-
-    Returns:
-        go.Figure: Heatmap figure.
-    """
-    if df.empty:
-        return apply_plotly_theme(go.Figure().update_layout(title="No data"))
-
-    pivot = df.pivot_table(values="overall_pass", index="model", columns="scale", aggfunc="mean")
-    pivot = (pivot * 100).round(1)
-
-    fig = go.Figure(
-        go.Heatmap(
-            z=pivot.values,
-            x=pivot.columns.tolist(),
-            y=pivot.index.tolist(),
-            text=pivot.values,
-            texttemplate="%{text:.1f}%",
-            colorscale="RdYlGn",
-            zmin=0,
-            zmax=100,
-            colorbar=dict(title="Pass %"),
-        )
-    )
-    fig.update_layout(
-        title="Pass Rate: Model x Scale", xaxis_title="Scale Type", yaxis_title="Model"
-    )
     return apply_plotly_theme(fig)
 
 
@@ -560,6 +673,10 @@ def build_major_vs_minor_by_model(df):
     models = sorted(df["model"].unique())
     major_rates = []
     minor_rates = []
+    major_passed = []
+    minor_passed = []
+    major_tested = []
+    minor_tested = []
 
     for model in models:
         mdf = df[df["model"] == model]
@@ -567,6 +684,13 @@ def build_major_vs_minor_by_model(df):
         mn = mdf[mdf["scale"] == "minor"]
         major_rates.append(round(maj["overall_pass"].mean() * 100, 1) if len(maj) > 0 else 0)
         minor_rates.append(round(mn["overall_pass"].mean() * 100, 1) if len(mn) > 0 else 0)
+        major_passed.append(int(maj["overall_pass"].sum()))
+        minor_passed.append(int(mn["overall_pass"].sum()))
+        major_tested.append(len(maj))
+        minor_tested.append(len(mn))
+
+    major_labels, major_counts = _rate_labels_and_counts(major_rates, major_passed, major_tested)
+    minor_labels, minor_counts = _rate_labels_and_counts(minor_rates, minor_passed, minor_tested)
 
     fig = go.Figure()
     fig.add_trace(
@@ -574,8 +698,10 @@ def build_major_vs_minor_by_model(df):
             name="Major",
             x=models,
             y=major_rates,
-            text=major_rates,
+            text=major_labels,
             textposition="auto",
+            customdata=major_counts,
+            hovertemplate=_rate_hover_template("Model: %{x}<br>Scale: Major"),
             marker_color="#5dade2",
         )
     )
@@ -584,8 +710,10 @@ def build_major_vs_minor_by_model(df):
             name="Minor",
             x=models,
             y=minor_rates,
-            text=minor_rates,
+            text=minor_labels,
             textposition="auto",
+            customdata=minor_counts,
+            hovertemplate=_rate_hover_template("Model: %{x}<br>Scale: Minor"),
             marker_color="#e74c3c",
         )
     )
@@ -621,20 +749,16 @@ def build_root_pass_rate(df):
     )
     stats["pass_rate"] = (stats["passed"] / stats["tested"] * 100).round(1)
     stats = stats.sort_values("pass_rate", ascending=False)
+    labels, counts = _rate_labels_and_counts(stats["pass_rate"], stats["passed"], stats["tested"])
 
     fig = go.Figure(
         go.Bar(
             x=stats["root"],
             y=stats["pass_rate"],
-            text=[
-                f"{r}% ({p}/{t})"
-                for r, p, t in zip(
-                    stats["pass_rate"],
-                    stats["passed"].astype(int),
-                    stats["tested"].astype(int),
-                )
-            ],
+            text=labels,
             textposition="auto",
+            customdata=counts,
+            hovertemplate=_rate_hover_template("Root: %{x}", denominator_label="Generations"),
             marker_color="#5dade2",
         )
     )
@@ -662,6 +786,10 @@ def build_root_scale_grouped(df):
     roots = sorted(df["root"].unique())
     major_rates = []
     minor_rates = []
+    major_passed = []
+    minor_passed = []
+    major_tested = []
+    minor_tested = []
 
     for root in roots:
         rdf = df[df["root"] == root]
@@ -669,6 +797,13 @@ def build_root_scale_grouped(df):
         mn = rdf[rdf["scale"] == "minor"]
         major_rates.append(round(maj["overall_pass"].mean() * 100, 1) if len(maj) > 0 else 0)
         minor_rates.append(round(mn["overall_pass"].mean() * 100, 1) if len(mn) > 0 else 0)
+        major_passed.append(int(maj["overall_pass"].sum()))
+        minor_passed.append(int(mn["overall_pass"].sum()))
+        major_tested.append(len(maj))
+        minor_tested.append(len(mn))
+
+    major_labels, major_counts = _rate_labels_and_counts(major_rates, major_passed, major_tested)
+    minor_labels, minor_counts = _rate_labels_and_counts(minor_rates, minor_passed, minor_tested)
 
     fig = go.Figure()
     fig.add_trace(
@@ -676,8 +811,10 @@ def build_root_scale_grouped(df):
             name="Major",
             x=roots,
             y=major_rates,
-            text=major_rates,
+            text=major_labels,
             textposition="auto",
+            customdata=major_counts,
+            hovertemplate=_rate_hover_template("Root: %{x}<br>Scale: Major"),
             marker_color="#5dade2",
         )
     )
@@ -686,8 +823,10 @@ def build_root_scale_grouped(df):
             name="Minor",
             x=roots,
             y=minor_rates,
-            text=minor_rates,
+            text=minor_labels,
             textposition="auto",
+            customdata=minor_counts,
+            hovertemplate=_rate_hover_template("Root: %{x}<br>Scale: Minor"),
             marker_color="#e74c3c",
         )
     )
@@ -717,10 +856,30 @@ def build_root_scale_heatmap(df):
     df_copy = df.copy()
     df_copy["root_scale"] = df_copy["root"] + " " + df_copy["scale"]
 
-    pivot = df_copy.pivot_table(
-        values="overall_pass", index="model", columns="root_scale", aggfunc="mean"
+    grouped = (
+        df_copy.groupby(["model", "root_scale"])["overall_pass"]
+        .agg(passed="sum", tested="count")
+        .reset_index()
     )
-    pivot = (pivot * 100).round(1)
+    grouped["pass_rate"] = (grouped["passed"] / grouped["tested"] * 100).round(1)
+    pivot = grouped.pivot(index="model", columns="root_scale", values="pass_rate")
+    passed = (
+        grouped.pivot(index="model", columns="root_scale", values="passed")
+        .reindex_like(pivot)
+        .fillna(0)
+    )
+    tested = (
+        grouped.pivot(index="model", columns="root_scale", values="tested")
+        .reindex_like(pivot)
+        .fillna(0)
+    )
+    counts = [
+        [
+            [int(passed.iloc[row, col]), int(tested.iloc[row, col])]
+            for col in range(len(pivot.columns))
+        ]
+        for row in range(len(pivot.index))
+    ]
 
     fig = go.Figure(
         go.Heatmap(
@@ -729,6 +888,12 @@ def build_root_scale_heatmap(df):
             y=pivot.index.tolist(),
             text=pivot.values,
             texttemplate="%{text:.1f}%",
+            customdata=counts,
+            hovertemplate=_rate_hover_template(
+                "Model: %{y}<br>Root + scale: %{x}",
+                denominator_label="Generations",
+                rate_value="%{z:.1f}",
+            ),
             colorscale="RdYlGn",
             zmin=0,
             zmax=100,
@@ -760,7 +925,14 @@ def build_latency_box(df):
 
     for model in models:
         mdf = df[df["model"] == model]
-        fig.add_trace(go.Box(y=mdf["api_latency"], name=model, boxmean=True))
+        fig.add_trace(
+            go.Box(
+                y=mdf["api_latency"],
+                name=model,
+                boxmean=True,
+                hovertemplate=("Model: %{fullData.name}<br>Latency: %{y:.2f}s<extra></extra>"),
+            )
+        )
 
     fig.update_layout(
         title="API Latency Distribution by Model",
@@ -801,6 +973,10 @@ def build_latency_vs_pass(df):
             mode="markers+text",
             text=stats["model"],
             textposition=text_positions,
+            hovertemplate=(
+                "Model: %{text}<br>Average latency: %{x:.2f}s<br>"
+                "Pass rate: %{y:.1f}%<extra></extra>"
+            ),
             marker=dict(
                 size=stats["count"] / stats["count"].max() * 30 + 10,
                 color=[MODEL_COLORS[i % len(MODEL_COLORS)] for i in range(len(stats))],
@@ -833,15 +1009,10 @@ def build_cost_by_model(df):
         .agg(
             total_cost=("cost", "sum"),
             tested=("cost", "count"),
-            passed=("overall_pass", "sum"),
         )
         .reset_index()
     )
     stats["cost_per_gen"] = (stats["total_cost"] / stats["tested"]).round(4)
-    stats["cost_per_success"] = stats.apply(
-        lambda r: round(r["total_cost"] / r["passed"], 4) if r["passed"] > 0 else 0,
-        axis=1,
-    )
     stats = stats.sort_values("total_cost", ascending=True)
 
     if stats["total_cost"].sum() == 0:
@@ -861,6 +1032,11 @@ def build_cost_by_model(df):
             orientation="h",
             text=[f"${c:.4f}" for c in stats["total_cost"]],
             textposition="auto",
+            customdata=stats["cost_per_gen"],
+            hovertemplate=(
+                "Model: %{y}<br>Total cost: $%{x:.5f}<br>"
+                "Cost per generation: $%{customdata:.5f}<extra></extra>"
+            ),
             marker_color="#f39c12",
         )
     )
@@ -915,6 +1091,10 @@ def build_cost_vs_pass(df):
             mode="markers+text",
             text=stats["model"],
             textposition=text_positions,
+            hovertemplate=(
+                "Model: %{text}<br>Cost per generation: $%{x:.5f}<br>"
+                "Pass rate: %{y:.1f}%<extra></extra>"
+            ),
             marker=dict(
                 size=15,
                 color=[MODEL_COLORS[i % len(MODEL_COLORS)] for i in range(len(stats))],
@@ -972,13 +1152,26 @@ def build_incorrect_pitches_by_model(df):
     fig = go.Figure()
     for model in sorted(model_pitch_counts.keys()):
         counts = model_pitch_counts[model]
+        values = [counts.get(note, 0) for note in all_notes]
+        total = sum(values)
+        customdata = [
+            [note_name_to_pitch_class(note), round(count / total * 100, 1) if total else 0]
+            for note, count in zip(all_notes, values)
+        ]
         fig.add_trace(
             go.Bar(
                 name=model,
                 x=all_notes,
-                y=[counts.get(n, 0) for n in all_notes],
-                text=[counts.get(n, 0) for n in all_notes],
+                y=values,
+                text=values,
                 textposition="auto",
+                customdata=customdata,
+                hovertemplate=(
+                    "Model: %{fullData.name}<br>Note: %{x}<br>"
+                    "Pitch class: %{customdata[0]}<br>Occurrences: %{y}<br>"
+                    "Share of this model's incorrect pitches: %{customdata[1]:.1f}%"
+                    "<extra></extra>"
+                ),
             )
         )
 
@@ -1036,13 +1229,26 @@ def build_incorrect_intervals_by_model(df):
     fig = go.Figure()
     for model in sorted(model_interval_counts.keys()):
         counts = model_interval_counts[model]
+        values = [counts.get(interval, 0) for interval in all_intervals]
+        total = sum(values)
+        customdata = [
+            [INTERVAL_NAMES.index(interval), round(count / total * 100, 1) if total else 0]
+            for interval, count in zip(all_intervals, values)
+        ]
         fig.add_trace(
             go.Bar(
                 name=model,
                 x=all_intervals,
-                y=[counts.get(iv, 0) for iv in all_intervals],
-                text=[counts.get(iv, 0) for iv in all_intervals],
+                y=values,
+                text=values,
                 textposition="auto",
+                customdata=customdata,
+                hovertemplate=(
+                    "Model: %{fullData.name}<br>Interval: %{x}<br>"
+                    "Semitones from prompted root: %{customdata[0]}<br>Occurrences: %{y}<br>"
+                    "Share of this model's incorrect intervals: %{customdata[1]:.1f}%"
+                    "<extra></extra>"
+                ),
             )
         )
 
@@ -1095,13 +1301,22 @@ def build_duration_errors_by_model(df):
     fig = go.Figure()
     for model in sorted(model_dur_counts.keys()):
         counts = model_dur_counts[model]
+        values = [counts.get(label, 0) for label in all_labels]
+        total = sum(values)
+        shares = [round(count / total * 100, 1) if total else 0 for count in values]
         fig.add_trace(
             go.Bar(
                 name=model,
                 x=all_labels,
-                y=[counts.get(label, 0) for label in all_labels],
-                text=[counts.get(label, 0) for label in all_labels],
+                y=values,
+                text=values,
                 textposition="auto",
+                customdata=shares,
+                hovertemplate=(
+                    "Model: %{fullData.name}<br>Duration mismatch: %{x}<br>"
+                    "Incorrect notes: %{y}<br>Share of this model's duration errors: "
+                    "%{customdata:.1f}%<extra></extra>"
+                ),
             )
         )
 
@@ -1175,6 +1390,8 @@ def build_effort_impact_delta(df):
                 "highest_effort": highest["effort"],
                 "lowest_rate": round(lowest["pass_rate"] * 100, 1),
                 "highest_rate": round(highest["pass_rate"] * 100, 1),
+                "lowest_count": int(lowest["count"]),
+                "highest_count": int(highest["count"]),
                 "delta": round(delta, 1),
             }
         )
@@ -1208,6 +1425,23 @@ def build_effort_impact_delta(df):
                 )
             ],
             textposition="auto",
+            customdata=list(
+                zip(
+                    result["lowest_effort"],
+                    result["lowest_rate"],
+                    result["lowest_count"],
+                    result["highest_effort"],
+                    result["highest_rate"],
+                    result["highest_count"],
+                )
+            ),
+            hovertemplate=(
+                "Model: %{y}<br>Delta: %{x:+.1f}pp<br>"
+                "Lowest: %{customdata[0]} — %{customdata[1]:.1f}% "
+                "(%{customdata[2]} generations)<br>"
+                "Highest: %{customdata[3]} — %{customdata[4]:.1f}% "
+                "(%{customdata[5]} generations)<extra></extra>"
+            ),
             marker_color=colors,
         )
     )
@@ -1264,6 +1498,10 @@ def build_reasoning_toggle_comparison(df):
     reas_latencies = []
     std_costs = []
     reas_costs = []
+    std_counts = []
+    reas_counts = []
+    std_passed = []
+    reas_passed = []
 
     for base in toggle_models:
         mask = df["base_model"] == base
@@ -1275,6 +1513,10 @@ def build_reasoning_toggle_comparison(df):
         reas_latencies.append(round(reas["api_latency"].mean(), 1) if len(reas) > 0 else 0)
         std_costs.append(round(std["cost"].mean(), 5) if len(std) > 0 else 0)
         reas_costs.append(round(reas["cost"].mean(), 5) if len(reas) > 0 else 0)
+        std_counts.append(len(std))
+        reas_counts.append(len(reas))
+        std_passed.append(int(std["overall_pass"].sum()))
+        reas_passed.append(int(reas["overall_pass"].sum()))
 
     from plotly.subplots import make_subplots
 
@@ -1294,6 +1536,12 @@ def build_reasoning_toggle_comparison(df):
             orientation="h",
             text=[f"{v}%" for v in std_rates],
             textposition="auto",
+            customdata=list(zip(std_passed, std_counts)),
+            hovertemplate=_rate_hover_template(
+                "Model: %{y}<br>Mode: Standard",
+                rate_value="%{x:.1f}",
+                denominator_label="Generations",
+            ),
             marker_color="#5dade2",
             showlegend=True,
         ),
@@ -1308,6 +1556,12 @@ def build_reasoning_toggle_comparison(df):
             orientation="h",
             text=[f"{v}%" for v in reas_rates],
             textposition="auto",
+            customdata=list(zip(reas_passed, reas_counts)),
+            hovertemplate=_rate_hover_template(
+                "Model: %{y}<br>Mode: Reasoning",
+                rate_value="%{x:.1f}",
+                denominator_label="Generations",
+            ),
             marker_color="#f39c12",
             showlegend=True,
         ),
@@ -1322,6 +1576,11 @@ def build_reasoning_toggle_comparison(df):
             orientation="h",
             text=[f"{v}s" for v in std_latencies],
             textposition="auto",
+            customdata=list(zip(std_counts)),
+            hovertemplate=(
+                "Model: %{y}<br>Mode: Standard<br>Average latency: %{x:.1f}s<br>"
+                "Generations: %{customdata[0]}<extra></extra>"
+            ),
             marker_color="#5dade2",
             showlegend=False,
         ),
@@ -1335,6 +1594,11 @@ def build_reasoning_toggle_comparison(df):
             orientation="h",
             text=[f"{v}s" for v in reas_latencies],
             textposition="auto",
+            customdata=list(zip(reas_counts)),
+            hovertemplate=(
+                "Model: %{y}<br>Mode: Reasoning<br>Average latency: %{x:.1f}s<br>"
+                "Generations: %{customdata[0]}<extra></extra>"
+            ),
             marker_color="#f39c12",
             showlegend=False,
         ),
@@ -1349,6 +1613,11 @@ def build_reasoning_toggle_comparison(df):
             orientation="h",
             text=[f"${v:.5f}" for v in std_costs],
             textposition="auto",
+            customdata=list(zip(std_counts)),
+            hovertemplate=(
+                "Model: %{y}<br>Mode: Standard<br>Average cost: $%{x:.5f}<br>"
+                "Generations: %{customdata[0]}<extra></extra>"
+            ),
             marker_color="#5dade2",
             showlegend=False,
         ),
@@ -1362,6 +1631,11 @@ def build_reasoning_toggle_comparison(df):
             orientation="h",
             text=[f"${v:.5f}" for v in reas_costs],
             textposition="auto",
+            customdata=list(zip(reas_counts)),
+            hovertemplate=(
+                "Model: %{y}<br>Mode: Reasoning<br>Average cost: $%{x:.5f}<br>"
+                "Generations: %{customdata[0]}<extra></extra>"
+            ),
             marker_color="#f39c12",
             showlegend=False,
         ),
@@ -1397,6 +1671,7 @@ def build_reasoning_cost_effectiveness(df):
         .agg(
             total_cost=("cost", "sum"),
             tested=("cost", "count"),
+            passed=("overall_pass", "sum"),
             pass_rate=("overall_pass", "mean"),
             avg_latency=("api_latency", "mean"),
         )
@@ -1463,6 +1738,13 @@ def build_reasoning_cost_effectiveness(df):
                 name=base,
                 text=bm_stats["model"],
                 textposition=list(bm_stats["_text_pos"]),
+                customdata=list(
+                    zip(bm_stats["passed"].astype(int), bm_stats["tested"].astype(int))
+                ),
+                hovertemplate=_rate_hover_template(
+                    "Model: %{text}<br>Cost per generation: $%{x:.5f}",
+                    denominator_label="Generations",
+                ),
                 marker=dict(size=12, color=color_map[base]),
             )
         )
@@ -1498,21 +1780,23 @@ def build_failure_rate_by_model(df):
     )
     stats["error_rate"] = (stats["errors"] / stats["total"] * 100).round(1)
     stats = stats.sort_values("error_rate", ascending=True)
+    labels, counts = _rate_labels_and_counts(stats["error_rate"], stats["errors"], stats["total"])
 
     fig = go.Figure(
         go.Bar(
             x=stats["error_rate"],
             y=stats["model"],
             orientation="h",
-            text=[
-                f"{r}% ({e}/{t})"
-                for r, e, t in zip(
-                    stats["error_rate"],
-                    stats["errors"].astype(int),
-                    stats["total"].astype(int),
-                )
-            ],
+            text=labels,
             textposition="auto",
+            customdata=counts,
+            hovertemplate=_rate_hover_template(
+                "Model: %{y}",
+                rate_label="Failure rate",
+                numerator_label="Errors",
+                denominator_label="Generations",
+                rate_value="%{x:.1f}",
+            ),
             marker_color="#e74c3c",
         )
     )
@@ -1882,17 +2166,28 @@ def create_app(run_path):
             [
                 dbc.Row(
                     [
-                        dbc.Col(dcc.Graph(figure=build_per_test_breakdown(filtered)), md=12),
-                    ],
-                    className="mb-3",
-                ),
-                dbc.Row(
-                    [
+                        dbc.Col(
+                            dcc.Graph(figure=build_duration_adherence_by_model(filtered)),
+                            md=6,
+                        ),
                         dbc.Col(
                             dcc.Graph(figure=build_major_vs_minor_by_model(filtered)),
                             md=6,
                         ),
-                        dbc.Col(dcc.Graph(figure=build_model_scale_heatmap(filtered)), md=6),
+                    ],
+                    className="mb-3",
+                ),
+                html.H4("Texture and Chord Performance", style={"color": PLOTLY_TEXT}),
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            dcc.Graph(figure=build_texture_performance_by_model(filtered)),
+                            md=6,
+                        ),
+                        dbc.Col(
+                            dcc.Graph(figure=build_chord_performance_by_model(filtered)),
+                            md=6,
+                        ),
                     ],
                     className="mb-3",
                 ),
@@ -2164,9 +2459,10 @@ def create_app(run_path):
         # Build all figures with the full (unfiltered) dataset
         figures = {
             "pass_rate_by_model": build_pass_rate_by_model(df),
-            "per_test_breakdown": build_per_test_breakdown(df),
+            "duration_adherence": build_duration_adherence_by_model(df),
+            "texture_performance": build_texture_performance_by_model(df),
+            "chord_performance": build_chord_performance_by_model(df),
             "model_root_heatmap": build_model_root_heatmap(df),
-            "model_scale_heatmap": build_model_scale_heatmap(df),
             "major_vs_minor": build_major_vs_minor_by_model(df),
             "root_pass_rate": build_root_pass_rate(df),
             "root_scale_grouped": build_root_scale_grouped(df),

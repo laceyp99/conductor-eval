@@ -3,7 +3,20 @@ from conductor_core.music import (
     SCALE_INTERVALS,
     note_name_to_pitch_class,
 )
-from mido import MidiFile
+
+from conductor_eval.midi import (
+    beats_to_ticks,
+    calculate_polyphony_profile,
+    extract_note_intervals,
+    ticks_to_beats,
+)
+
+_ROMAN_DEGREES = {
+    "I": 0,
+    "IV": 3,
+    "V": 4,
+    "VI": 5,
+}
 
 
 def scale_test(midi, root, scale):
@@ -78,9 +91,8 @@ def duration_test(midi, duration):
     if duration not in DURATION_BEATS:
         raise ValueError(f"Invalid duration: {duration}")
 
-    duration_ticks = DURATION_BEATS[duration]
     ticks_per_beat = midi.ticks_per_beat
-    expected_ticks = duration_ticks * ticks_per_beat
+    expected_ticks = beats_to_ticks(DURATION_BEATS[duration], ticks_per_beat, "duration")
     # print(f"Expected duration in ticks: {expected_ticks}")
 
     total = 0
@@ -104,7 +116,7 @@ def duration_test(midi, duration):
 
                     if note_duration != expected_ticks:
                         incorrect += 1
-                        ratio = note_duration / ticks_per_beat
+                        ratio = ticks_to_beats(note_duration, ticks_per_beat, "note_duration")
                         if ratio not in incorrect_lengths.keys():
                             incorrect_lengths[ratio] = 1
                         else:
@@ -120,139 +132,171 @@ def duration_test(midi, duration):
     return results
 
 
-def is_monophonic(midi):
-    """Tests whether the MIDI file is either monophonic fully throughout or has polyphonic moments.
-    Great quick test for simple checks on one line melody prompts.
-
-    Args:
-        midi (MidiFile): The MIDI file to check.
-
-    Returns:
-        dict: Contains 'is_monophonic' (bool) and 'max_polyphony' (int) indicating the maximum
-              number of simultaneous notes at any point.
-    """
-    max_polyphony = 0
-
-    for track in midi.tracks:
-        active_notes = {}  # note -> count (handles same note played multiple times)
-        current_polyphony = 0
-
-        for msg in track:
-            if msg.type == "note_on" and msg.velocity > 0:
-                active_notes[msg.note] = active_notes.get(msg.note, 0) + 1
-                current_polyphony = sum(active_notes.values())
-                max_polyphony = max(max_polyphony, current_polyphony)
-            elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
-                if msg.note in active_notes:
-                    active_notes[msg.note] -= 1
-                    if active_notes[msg.note] <= 0:
-                        del active_notes[msg.note]
-
-    return {"is_monophonic": max_polyphony <= 1, "max_polyphony": max_polyphony}
-
-
-def polyphonic_profile(midi):
-    """Tests and measures the time the MIDI file exhibits different levels of polyphony (including monophony).
-
-    Args:
-        midi (MidiFile): The MIDI file to check.
-
-    Returns:
-        dict: Contains 'polyphony_distribution' mapping polyphony levels to time in beats,
-        'max_polyphony' (int),
-        'total_duration' in beats,
-        'polyphony_percentages',
-        and 'ticks_per_beat' used for conversion.
-    """
-    ticks_per_beat = midi.ticks_per_beat
-    polyphony_distribution_ticks = {}
-    max_polyphony = 0
-    total_duration_ticks = 0
-
-    for track in midi.tracks:
-        active_notes = {}  # note -> count
-        current_polyphony = 0
-
-        for msg in track:
-            # Accumulate time at current polyphony level before processing the event
-            if msg.time > 0:
-                polyphony_distribution_ticks[current_polyphony] = (
-                    polyphony_distribution_ticks.get(current_polyphony, 0) + msg.time
-                )
-                total_duration_ticks += msg.time
-
-            # Update active notes count
-            if msg.type == "note_on" and msg.velocity > 0:
-                active_notes[msg.note] = active_notes.get(msg.note, 0) + 1
-                current_polyphony = sum(active_notes.values())
-                max_polyphony = max(max_polyphony, current_polyphony)
-            elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
-                if msg.note in active_notes:
-                    active_notes[msg.note] -= 1
-                    if active_notes[msg.note] <= 0:
-                        del active_notes[msg.note]
-                    current_polyphony = sum(active_notes.values())
-
-    # Convert ticks to beats and calculate percentages
-    polyphony_distribution = {}
-    polyphony_percentages = {}
-    total_duration = total_duration_ticks / ticks_per_beat
-
-    for level, ticks in polyphony_distribution_ticks.items():
-        polyphony_distribution[level] = round(ticks / ticks_per_beat, 4)
-        if total_duration_ticks > 0:
-            polyphony_percentages[level] = round((ticks / total_duration_ticks) * 100, 2)
-
+def monophony_test(midi):
+    """Test whether no completed notes overlap anywhere in the MIDI file."""
+    profile = calculate_polyphony_profile(midi)
+    passed = profile["max_polyphony"] <= 1
     return {
-        "polyphony_distribution": polyphony_distribution,
-        "polyphony_percentages": polyphony_percentages,
-        "max_polyphony": max_polyphony,
-        "total_duration": round(total_duration, 4),
-        "ticks_per_beat": ticks_per_beat,
+        "passed": passed,
+        **profile,
     }
 
 
-def arpeggio_test(midi, root, scale, duration):
-    """Tests whether the MIDI file contains arpeggiated patterns, which are characterized by a monophonic sequence of notes that outline a chord.
+def polyphony_test(midi, min_voices=2):
+    """Test whether the MIDI reaches a requested number of simultaneous voices."""
+    if not isinstance(min_voices, int) or isinstance(min_voices, bool) or min_voices < 2:
+        raise ValueError("min_voices must be an integer greater than or equal to 2")
 
-    Args:
-        midi (MidiFile): The MIDI file to check.
-        root (str): The musical root note.
-        scale (str): The musical scale.
-        duration (str): The note duration.
-    Returns:
-        boolean: True if arpeggiated patterns are detected, False otherwise.
-    """
-    return (
-        scale_test(midi, root, scale)["incorrect"] == 0
-        and duration_test(midi, duration)["incorrect"] == 0
-        and is_monophonic(midi)["is_monophonic"]
-    )
-
-
-def run_midi_tests(midi_data, root, scale, duration):
-    """Run a series of tests on the generated MIDI data to validate its structure and musicality.
-
-    Args:
-        midi_data (MidiFile): The MIDI data to test.
-        root (str): The musical root note.
-        scale (str): The musical scale.
-        duration (str): The note duration.
-
-    Returns:
-        dict: A dictionary containing the results of the tests, including whether each test passed.
-    """
+    profile = calculate_polyphony_profile(midi)
+    passed = profile["max_polyphony"] >= min_voices
     return {
-        "key_results": scale_test(midi_data, root, scale),
-        "duration_results": duration_test(midi_data, duration),
-        "polyphony_results": is_monophonic(midi_data),
-        "polyphonic_profile": polyphonic_profile(midi_data),
-        "arpeggio_results": arpeggio_test(midi_data, root, scale, duration),
+        "passed": passed,
+        "min_voices": min_voices,
+        **profile,
     }
 
 
-if __name__ == "__main__":
-    # Single test example
-    test_path = "/path/to/loop.mid"
-    midi = MidiFile(test_path)
-    print(f"Test Results: {run_midi_tests(midi, 'C', 'major', 'quarter')}")
+def _resolve_diatonic_triads(root, scale, progression):
+    """Resolve supported scale degrees to pitch-class triads."""
+    try:
+        root_pc = note_name_to_pitch_class(root)
+    except ValueError:
+        raise ValueError(f"Invalid root note: {root}") from None
+
+    scale_name = scale.lower()
+    if scale_name not in {"major", "minor"}:
+        raise ValueError("Chord progression checks support major and minor scales")
+    if not isinstance(progression, list) or not progression:
+        raise ValueError("progression must be a non-empty list of Roman numerals")
+
+    scale_pcs = [(root_pc + interval) % 12 for interval in SCALE_INTERVALS[scale_name]]
+    resolved = []
+    for numeral in progression:
+        if not isinstance(numeral, str) or numeral.upper() not in _ROMAN_DEGREES:
+            supported = ", ".join(_ROMAN_DEGREES)
+            raise ValueError(f"Unsupported Roman numeral {numeral!r}; expected one of: {supported}")
+        degree = _ROMAN_DEGREES[numeral.upper()]
+        pitch_classes = {
+            scale_pcs[degree],
+            scale_pcs[(degree + 2) % 7],
+            scale_pcs[(degree + 4) % 7],
+        }
+        resolved.append((numeral, pitch_classes))
+    return resolved
+
+
+def chord_progression_test(
+    midi,
+    root,
+    scale,
+    progression,
+    beats_per_chord=4,
+    strict=True,
+):
+    """Test diatonic chord pitch classes at fixed harmonic boundaries.
+
+    Roman-numeral case is treated as a scale-degree label. Chord quality is
+    derived from the selected scale so all expected tones remain diatonic.
+    """
+    if not isinstance(strict, bool):
+        raise ValueError("strict must be a boolean")
+    chord_ticks = beats_to_ticks(beats_per_chord, midi.ticks_per_beat, "beats_per_chord")
+    if chord_ticks == 0:
+        raise ValueError("beats_per_chord must be greater than zero")
+
+    expected_chords = _resolve_diatonic_triads(root, scale, progression)
+    intervals = extract_note_intervals(midi)
+    bar_results = []
+
+    for index, (numeral, expected_pcs) in enumerate(expected_chords):
+        onset_tick = index * chord_ticks
+        actual_pcs = {
+            note.pitch % 12 for note in intervals if note.start_tick <= onset_tick < note.end_tick
+        }
+        missing = expected_pcs - actual_pcs
+        extra = actual_pcs - expected_pcs
+        passed = not missing and (not strict or not extra)
+        bar_results.append(
+            {
+                "bar": index + 1,
+                "numeral": numeral,
+                "onset_beat": ticks_to_beats(onset_tick, midi.ticks_per_beat),
+                "expected_pitch_classes": sorted(expected_pcs),
+                "actual_pitch_classes": sorted(actual_pcs),
+                "missing_pitch_classes": sorted(missing),
+                "extra_pitch_classes": sorted(extra),
+                "passed": passed,
+            }
+        )
+
+    return {
+        "passed": all(bar["passed"] for bar in bar_results),
+        "strict": strict,
+        "bars": bar_results,
+    }
+
+
+def harmonic_rhythm_test(midi, expected_onsets):
+    """Test that completed notes begin only at the expected beat positions."""
+    if not isinstance(expected_onsets, list) or not expected_onsets:
+        raise ValueError("expected_onsets must be a non-empty list")
+    expected_ticks = {
+        beats_to_ticks(beat, midi.ticks_per_beat, "expected_onsets") for beat in expected_onsets
+    }
+    if len(expected_ticks) != len(expected_onsets):
+        raise ValueError("expected_onsets must contain unique beat positions")
+
+    actual_ticks = {note.start_tick for note in extract_note_intervals(midi)}
+    missing_ticks = expected_ticks - actual_ticks
+    unexpected_ticks = actual_ticks - expected_ticks
+
+    def to_beats(ticks):
+        return [ticks_to_beats(tick, midi.ticks_per_beat) for tick in sorted(ticks)]
+
+    return {
+        "passed": not missing_ticks and not unexpected_ticks,
+        "expected_onsets": to_beats(expected_ticks),
+        "actual_onsets": to_beats(actual_ticks),
+        "missing_onsets": to_beats(missing_ticks),
+        "unexpected_onsets": to_beats(unexpected_ticks),
+    }
+
+
+def chord_event_positions_test(midi, expected_starts, expected_ends):
+    """Test that every completed note uses an expected start/end beat pair."""
+    if not isinstance(expected_starts, list) or not isinstance(expected_ends, list):
+        raise ValueError("expected_starts and expected_ends must be lists")
+    if not expected_starts or len(expected_starts) != len(expected_ends):
+        raise ValueError("expected_starts and expected_ends must have the same non-zero length")
+
+    expected_pairs = set()
+    for start, end in zip(expected_starts, expected_ends):
+        start_tick = beats_to_ticks(start, midi.ticks_per_beat, "expected_starts")
+        end_tick = beats_to_ticks(end, midi.ticks_per_beat, "expected_ends")
+        if end_tick <= start_tick:
+            raise ValueError("Every expected end must be later than its start")
+        expected_pairs.add((start_tick, end_tick))
+    if len(expected_pairs) != len(expected_starts):
+        raise ValueError("Expected start/end pairs must be unique")
+
+    intervals = extract_note_intervals(midi)
+    actual_pairs = {(note.start_tick, note.end_tick) for note in intervals}
+    missing_pairs = expected_pairs - actual_pairs
+    unexpected_pairs = actual_pairs - expected_pairs
+
+    def serialize(pairs):
+        return [
+            {
+                "start_beat": ticks_to_beats(start, midi.ticks_per_beat),
+                "end_beat": ticks_to_beats(end, midi.ticks_per_beat),
+            }
+            for start, end in sorted(pairs)
+        ]
+
+    return {
+        "passed": bool(intervals) and not missing_pairs and not unexpected_pairs,
+        "expected_positions": serialize(expected_pairs),
+        "actual_positions": serialize(actual_pairs),
+        "missing_positions": serialize(missing_pairs),
+        "unexpected_positions": serialize(unexpected_pairs),
+    }
