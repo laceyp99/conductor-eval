@@ -4,7 +4,18 @@ import pandas as pd
 
 from conductor_eval.analysis import (
     build_chord_performance_by_model,
+    build_cost_by_model,
+    build_cost_vs_pass,
     build_duration_adherence_by_model,
+    build_duration_errors_by_model,
+    build_failure_rate_by_model,
+    build_incorrect_intervals_by_model,
+    build_incorrect_pitches_by_model,
+    build_latency_box,
+    build_latency_vs_pass,
+    build_major_vs_minor_by_model,
+    build_model_root_heatmap,
+    build_pass_rate_by_model,
     build_texture_performance_by_model,
     load_run,
 )
@@ -212,3 +223,121 @@ def test_chord_performance_has_empty_state_when_no_chord_checks_ran():
 
     assert not fig.data
     assert fig.layout.annotations[0].text == "No chord checks ran"
+
+
+def test_rate_charts_share_passed_and_generation_count_context():
+    df = pd.DataFrame(
+        [
+            {"model": "alpha", "root": "C", "scale": "major", "overall_pass": True},
+            {"model": "alpha", "root": "D", "scale": "minor", "overall_pass": False},
+            {"model": "beta", "root": "C", "scale": "major", "overall_pass": False},
+        ]
+    )
+
+    overall = build_pass_rate_by_model(df)
+    major_minor = build_major_vs_minor_by_model(df)
+    heatmap = build_model_root_heatmap(df)
+
+    alpha_index = list(overall.data[0].y).index("alpha")
+    assert list(overall.data[0].customdata[alpha_index]) == [1, 2]
+    assert "Passed: %{customdata[0]}" in overall.data[0].hovertemplate
+    assert list(major_minor.data[0].customdata[0]) == [1, 1]
+    assert "Executed: %{customdata[1]}" in major_minor.data[0].hovertemplate
+    assert list(heatmap.data[0].customdata[0][0]) == [1, 1]
+
+
+def test_failure_rate_uses_error_and_generation_count_labels():
+    df = pd.DataFrame(
+        [
+            {"model": "alpha", "has_error": True},
+            {"model": "alpha", "has_error": False},
+        ]
+    )
+
+    fig = build_failure_rate_by_model(df)
+
+    assert list(fig.data[0].customdata[0]) == [1, 2]
+    assert fig.data[0].text[0] == "50.0% (1/2)"
+    assert "Errors: %{customdata[0]}" in fig.data[0].hovertemplate
+
+
+def test_tradeoff_and_total_cost_hovers_omit_unneeded_count_context():
+    df = pd.DataFrame(
+        [
+            {"model": "alpha", "api_latency": 2.0, "cost": 0.25, "overall_pass": True},
+            {"model": "alpha", "api_latency": 4.0, "cost": 0.75, "overall_pass": False},
+        ]
+    )
+
+    latency = build_latency_vs_pass(df).data[0].hovertemplate
+    cost_tradeoff = build_cost_vs_pass(df).data[0].hovertemplate
+    total_cost = build_cost_by_model(df).data[0].hovertemplate
+
+    assert "Pass rate: %{y:.1f}%" in latency
+    assert "Passed:" not in latency
+    assert "Generations:" not in latency
+    assert "Pass rate: %{y:.1f}%" in cost_tradeoff
+    assert "Passed:" not in cost_tradeoff
+    assert "Generations:" not in cost_tradeoff
+    assert "Cost per generation:" in total_cost
+    assert "Cost per success:" not in total_cost
+    assert "Passed:" not in total_cost
+    assert "Generations:" not in total_cost
+
+
+def test_pitch_and_interval_error_hovers_include_musical_context_and_share():
+    df = pd.DataFrame(
+        [
+            {
+                "model": "alpha",
+                "root": "C",
+                "scale_ran": True,
+                "scale_pitches_incorrect": [1, 1, 3],
+            }
+        ]
+    )
+
+    pitches = build_incorrect_pitches_by_model(df).data[0]
+    intervals = build_incorrect_intervals_by_model(df).data[0]
+
+    assert "Pitch class: %{customdata[0]}" in pitches.hovertemplate
+    assert "Occurrences: %{y}" in pitches.hovertemplate
+    assert sorted(value[1] for value in pitches.customdata) == [33.3, 66.7]
+    assert "Semitones from prompted root: %{customdata[0]}" in intervals.hovertemplate
+    assert "Occurrences: %{y}" in intervals.hovertemplate
+    assert sorted(value[1] for value in intervals.customdata) == [33.3, 66.7]
+
+
+def test_duration_error_hover_includes_count_and_within_model_share():
+    df = pd.DataFrame(
+        [
+            {
+                "model": "alpha",
+                "duration_ran": True,
+                "duration_param": "quarter",
+                "duration_lengths": {"0.5": 3, "2.0": 1},
+            }
+        ]
+    )
+
+    trace = build_duration_errors_by_model(df).data[0]
+
+    assert "Incorrect notes: %{y}" in trace.hovertemplate
+    assert "Share of this model's duration errors" in trace.hovertemplate
+    assert sorted(trace.customdata) == [25.0, 75.0]
+
+
+def test_latency_distribution_hover_omits_fence_statistics():
+    df = pd.DataFrame(
+        [
+            {"model": "alpha", "api_latency": 1.0},
+            {"model": "alpha", "api_latency": 2.0},
+            {"model": "alpha", "api_latency": 3.0},
+        ]
+    )
+
+    hover = build_latency_box(df).data[0].hovertemplate.lower()
+
+    assert "latency: %{y:.2f}s" in hover
+    assert "upper fence" not in hover
+    assert "lower fence" not in hover
