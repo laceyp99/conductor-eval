@@ -17,6 +17,7 @@ from conductor_eval.analysis import (
     build_model_root_heatmap,
     build_pass_rate_by_model,
     build_texture_performance_by_model,
+    compute_text_positions,
     load_run,
 )
 
@@ -283,6 +284,42 @@ def test_tradeoff_and_total_cost_hovers_omit_unneeded_count_context():
     assert "Cost per success:" not in total_cost
     assert "Passed:" not in total_cost
     assert "Generations:" not in total_cost
+
+
+def test_scatter_text_positions_point_inward_at_horizontal_boundaries():
+    positions = compute_text_positions([0.0, 0.5, 1.0], [50.0, 50.0, 50.0])
+
+    assert positions[0].endswith("right")
+    assert positions[-1].endswith("left")
+
+
+def test_tradeoff_charts_compact_long_labels_and_keep_full_names_in_hover():
+    long_model = "provider/model-with-an-unusually-long-version-identifier"
+    df = pd.DataFrame(
+        [
+            {
+                "model": long_model,
+                "api_latency": 1.0,
+                "cost": 0.01,
+                "overall_pass": True,
+            },
+            {
+                "model": "short-model",
+                "api_latency": 2.0,
+                "cost": 0.02,
+                "overall_pass": False,
+            },
+        ]
+    )
+
+    for figure in (build_latency_vs_pass(df), build_cost_vs_pass(df)):
+        trace = figure.data[0]
+        long_model_index = list(trace.customdata).index(long_model)
+
+        assert len(trace.text[long_model_index]) == 24
+        assert "…" in trace.text[long_model_index]
+        assert trace.customdata[long_model_index] == long_model
+        assert "Model: %{customdata}" in trace.hovertemplate
 
 
 def test_pitch_and_interval_error_hovers_include_musical_context_and_share():
