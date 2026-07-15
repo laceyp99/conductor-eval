@@ -191,6 +191,11 @@ def load_run(run_path):
         # Scale test details
         scale_test = tests.get("scale", {})
         duration_test = tests.get("duration", {})
+        monophony_test = tests.get("monophony", {})
+        polyphony_test = tests.get("polyphony", {})
+        chord_progression_test = tests.get("chord_progression", {})
+        harmonic_rhythm_test = tests.get("harmonic_rhythm", {})
+        chord_event_positions_test = tests.get("chord_event_positions", {})
 
         row = {
             "model": result.get("model", "unknown"),
@@ -224,6 +229,39 @@ def load_run(run_path):
             "duration_incorrect": duration_test.get("incorrect", 0),
             "duration_lengths": duration_test.get("lengths", {}),
             "duration_param": duration_test.get("params", {}).get("duration", ""),
+            # Texture tests
+            "monophony_ran": monophony_test.get("ran", False),
+            "monophony_pass": monophony_test.get("passed", False),
+            "monophony_max_polyphony": monophony_test.get("max_polyphony", 0),
+            "monophony_distribution": monophony_test.get("polyphony_distribution", {}),
+            "monophony_percentages": monophony_test.get("polyphony_percentages", {}),
+            "polyphony_ran": polyphony_test.get("ran", False),
+            "polyphony_pass": polyphony_test.get("passed", False),
+            "polyphony_max_polyphony": polyphony_test.get("max_polyphony", 0),
+            "polyphony_min_voices": polyphony_test.get("params", {}).get(
+                "min_voices", polyphony_test.get("min_voices")
+            ),
+            "polyphony_distribution": polyphony_test.get("polyphony_distribution", {}),
+            "polyphony_percentages": polyphony_test.get("polyphony_percentages", {}),
+            # Chord identity test
+            "chord_progression_ran": chord_progression_test.get("ran", False),
+            "chord_progression_pass": chord_progression_test.get("passed", False),
+            "chord_progression_params": chord_progression_test.get("params", {}),
+            "chord_progression_bars": chord_progression_test.get("bars", []),
+            # Harmonic rhythm test
+            "harmonic_rhythm_ran": harmonic_rhythm_test.get("ran", False),
+            "harmonic_rhythm_pass": harmonic_rhythm_test.get("passed", False),
+            "harmonic_rhythm_missing_onsets": harmonic_rhythm_test.get("missing_onsets", []),
+            "harmonic_rhythm_unexpected_onsets": harmonic_rhythm_test.get("unexpected_onsets", []),
+            # Chord event-position test
+            "chord_event_positions_ran": chord_event_positions_test.get("ran", False),
+            "chord_event_positions_pass": chord_event_positions_test.get("passed", False),
+            "chord_event_positions_missing": chord_event_positions_test.get(
+                "missing_positions", []
+            ),
+            "chord_event_positions_unexpected": chord_event_positions_test.get(
+                "unexpected_positions", []
+            ),
         }
         rows.append(row)
 
@@ -244,6 +282,31 @@ def load_run(run_path):
         df["scale_pass"] = df.apply(lambda r: r["scale_incorrect"] == 0 and r["scale_ran"], axis=1)
         df["duration_pass"] = df.apply(
             lambda r: r["duration_incorrect"] == 0 and r["duration_ran"], axis=1
+        )
+        for test_name in (
+            "monophony",
+            "polyphony",
+            "chord_progression",
+            "harmonic_rhythm",
+            "chord_event_positions",
+        ):
+            df[f"{test_name}_pass"] = df[f"{test_name}_ran"] & df[f"{test_name}_pass"].fillna(False)
+
+        df["polyphony_voice_shortfall"] = df.apply(
+            lambda r: (
+                max(r["polyphony_min_voices"] - r["polyphony_max_polyphony"], 0)
+                if r["polyphony_ran"] and pd.notna(r["polyphony_min_voices"])
+                else None
+            ),
+            axis=1,
+        )
+        df["chord_progression_failed_bars"] = df.apply(
+            lambda r: (
+                [bar for bar in r["chord_progression_bars"] if not bar.get("passed", False)]
+                if r["chord_progression_ran"]
+                else []
+            ),
+            axis=1,
         )
 
         # Build model instance names when reasoning is being tested.
