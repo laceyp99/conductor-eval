@@ -49,6 +49,40 @@ logger = logging.getLogger(__name__)
 
 MODEL_COLORS = px.colors.qualitative.Set2
 DEFAULT_EVALUATIONS_DIR = Path("evaluations")
+MODEL_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _model_sort_key(model):
+    """Return a deterministic base-model and reasoning-effort sort key."""
+    display_name = str(model)
+    base_model = display_name
+    effort = None
+
+    if display_name.endswith(")") and " (" in display_name:
+        base_model, effort = display_name.rsplit(" (", 1)
+        effort = effort[:-1]
+
+    normalized_effort = effort.casefold() if effort is not None else None
+    if normalized_effort is None:
+        variant_key = (0, -1, "")
+    elif normalized_effort in MODEL_EFFORT_ORDER:
+        variant_key = (1, MODEL_EFFORT_ORDER.index(normalized_effort), "")
+    else:
+        variant_key = (2, len(MODEL_EFFORT_ORDER), normalized_effort)
+
+    return (base_model.casefold(), *variant_key, display_name.casefold(), display_name)
+
+
+def _sort_model_names(models):
+    """Sort display names with variants grouped by base model and effort."""
+    return sorted(models, key=_model_sort_key)
+
+
+def _sort_by_model(frame, column="model"):
+    """Return a DataFrame ordered by the shared model display-name scheme."""
+    order = {model: index for index, model in enumerate(_sort_model_names(frame[column].unique()))}
+    return frame.sort_values(column, key=lambda values: values.map(order)).reset_index(drop=True)
+
 
 # Plotly textposition options mapped to angles (degrees, counter-clockwise from +x axis).
 # The label is placed in the direction of the angle relative to the marker.
@@ -470,7 +504,7 @@ def build_pass_rate_by_model(df):
         .reset_index()
     )
     stats["pass_rate"] = (stats["passed"] / stats["tested"] * 100).round(1)
-    stats = stats.sort_values("pass_rate", ascending=True)
+    stats = _sort_by_model(stats)
     labels, counts = _rate_labels_and_counts(stats["pass_rate"], stats["passed"], stats["tested"])
 
     fig = go.Figure(
@@ -492,6 +526,7 @@ def build_pass_rate_by_model(df):
         xaxis_title="Pass Rate (%)",
         yaxis_title="",
         xaxis=dict(range=[0, 105]),
+        yaxis=dict(autorange="reversed"),
     )
     return apply_plotly_theme(fig)
 
@@ -517,12 +552,8 @@ def _add_check_pass_rate_trace(fig, eligible, pass_column, trace_name):
     if eligible.empty:
         return
 
-    stats = (
-        eligible.groupby("model")[pass_column]
-        .agg(tested="count", passed="sum")
-        .reset_index()
-        .sort_values("model")
-    )
+    stats = eligible.groupby("model")[pass_column].agg(tested="count", passed="sum").reset_index()
+    stats = _sort_by_model(stats)
     stats["pass_rate"] = (stats["passed"] / stats["tested"] * 100).round(1)
     labels, counts = _rate_labels_and_counts(stats["pass_rate"], stats["passed"], stats["tested"])
     fig.add_trace(
@@ -623,6 +654,7 @@ def build_model_root_heatmap(df):
     )
     grouped["pass_rate"] = (grouped["passed"] / grouped["tested"] * 100).round(1)
     pivot = grouped.pivot(index="model", columns="root", values="pass_rate")
+    pivot = pivot.reindex(_sort_model_names(pivot.index))
     passed = (
         grouped.pivot(index="model", columns="root", values="passed").reindex_like(pivot).fillna(0)
     )
@@ -654,7 +686,12 @@ def build_model_root_heatmap(df):
             colorbar=dict(title="Pass %"),
         )
     )
-    fig.update_layout(title="Pass Rate: Model x Root", xaxis_title="Root", yaxis_title="Model")
+    fig.update_layout(
+        title="Pass Rate: Model x Root",
+        xaxis_title="Root",
+        yaxis_title="Model",
+        yaxis=dict(autorange="reversed"),
+    )
     return apply_plotly_theme(fig)
 
 
@@ -670,7 +707,7 @@ def build_major_vs_minor_by_model(df):
     if df.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
-    models = sorted(df["model"].unique())
+    models = _sort_model_names(df["model"].unique())
     major_rates = []
     minor_rates = []
     major_passed = []
@@ -863,6 +900,7 @@ def build_root_scale_heatmap(df):
     )
     grouped["pass_rate"] = (grouped["passed"] / grouped["tested"] * 100).round(1)
     pivot = grouped.pivot(index="model", columns="root_scale", values="pass_rate")
+    pivot = pivot.reindex(_sort_model_names(pivot.index))
     passed = (
         grouped.pivot(index="model", columns="root_scale", values="passed")
         .reindex_like(pivot)
@@ -904,6 +942,7 @@ def build_root_scale_heatmap(df):
         title="Pass Rate: Model x Root+Scale",
         xaxis_title="Root + Scale",
         yaxis_title="Model",
+        yaxis=dict(autorange="reversed"),
     )
     return apply_plotly_theme(fig)
 
@@ -921,7 +960,7 @@ def build_latency_box(df):
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
     fig = go.Figure()
-    models = sorted(df["model"].unique())
+    models = _sort_model_names(df["model"].unique())
 
     for model in models:
         mdf = df[df["model"] == model]
@@ -964,6 +1003,7 @@ def build_latency_vs_pass(df):
         .reset_index()
     )
     stats["pass_rate"] = (stats["pass_rate"] * 100).round(1)
+    stats = _sort_by_model(stats)
 
     text_positions = compute_text_positions(stats["avg_latency"], stats["pass_rate"])
     fig = go.Figure(
@@ -1013,7 +1053,7 @@ def build_cost_by_model(df):
         .reset_index()
     )
     stats["cost_per_gen"] = (stats["total_cost"] / stats["tested"]).round(4)
-    stats = stats.sort_values("total_cost", ascending=True)
+    stats = _sort_by_model(stats)
 
     if stats["total_cost"].sum() == 0:
         fig = go.Figure()
@@ -1044,6 +1084,7 @@ def build_cost_by_model(df):
         title="Total Cost by Model",
         xaxis_title="Total Cost ($)",
         yaxis_title="",
+        yaxis=dict(autorange="reversed"),
     )
     return apply_plotly_theme(fig)
 
@@ -1082,6 +1123,7 @@ def build_cost_vs_pass(df):
 
     stats["cost_per_gen"] = stats["total_cost"] / stats["tested"]
     stats["pass_rate"] = (stats["pass_rate"] * 100).round(1)
+    stats = _sort_by_model(stats)
 
     text_positions = compute_text_positions(stats["cost_per_gen"], stats["pass_rate"])
     fig = go.Figure(
@@ -1150,7 +1192,7 @@ def build_incorrect_pitches_by_model(df):
         key=lambda n: NOTE_NAMES.index(n) if n in NOTE_NAMES else 99,
     )
     fig = go.Figure()
-    for model in sorted(model_pitch_counts.keys()):
+    for model in _sort_model_names(model_pitch_counts):
         counts = model_pitch_counts[model]
         values = [counts.get(note, 0) for note in all_notes]
         total = sum(values)
@@ -1227,7 +1269,7 @@ def build_incorrect_intervals_by_model(df):
     ]
 
     fig = go.Figure()
-    for model in sorted(model_interval_counts.keys()):
+    for model in _sort_model_names(model_interval_counts):
         counts = model_interval_counts[model]
         values = [counts.get(interval, 0) for interval in all_intervals]
         total = sum(values)
@@ -1299,7 +1341,7 @@ def build_duration_errors_by_model(df):
     all_labels = sorted({label for counts in model_dur_counts.values() for label in counts})
 
     fig = go.Figure()
-    for model in sorted(model_dur_counts.keys()):
+    for model in _sort_model_names(model_dur_counts):
         counts = model_dur_counts[model]
         values = [counts.get(label, 0) for label in all_labels]
         total = sum(values)
@@ -1690,11 +1732,10 @@ def build_reasoning_cost_effectiveness(df):
 
     stats["cost_per_gen"] = stats["total_cost"] / stats["tested"]
     stats["pass_rate_pct"] = (stats["pass_rate"] * 100).round(1)
-
-    EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    stats = _sort_by_model(stats)
 
     # Assign colors per base_model
-    base_models = sorted(stats["base_model"].unique())
+    base_models = _sort_model_names(stats["base_model"].unique())
     color_map = {bm: MODEL_COLORS[i % len(MODEL_COLORS)] for i, bm in enumerate(base_models)}
 
     fig = go.Figure()
@@ -1703,15 +1744,7 @@ def build_reasoning_cost_effectiveness(df):
     for base in base_models:
         bm_stats = stats[stats["base_model"] == base].copy()
         if len(bm_stats) > 1:
-            # Extract effort from the instance name and sort by effort order
-            def _effort_from_name(name):
-                if "(" in name and ")" in name:
-                    e = name.split("(")[-1].rstrip(")")
-                    return EFFORT_ORDER.index(e) if e in EFFORT_ORDER else len(EFFORT_ORDER)
-                return -1
-
-            bm_stats["_rank"] = bm_stats["model"].apply(_effort_from_name)
-            bm_stats = bm_stats.sort_values("_rank")
+            bm_stats = _sort_by_model(bm_stats)
             fig.add_trace(
                 go.Scatter(
                     x=bm_stats["cost_per_gen"],
@@ -1779,7 +1812,7 @@ def build_failure_rate_by_model(df):
         .reset_index()
     )
     stats["error_rate"] = (stats["errors"] / stats["total"] * 100).round(1)
-    stats = stats.sort_values("error_rate", ascending=True)
+    stats = _sort_by_model(stats)
     labels, counts = _rate_labels_and_counts(stats["error_rate"], stats["errors"], stats["total"])
 
     fig = go.Figure(
@@ -1805,6 +1838,7 @@ def build_failure_rate_by_model(df):
         xaxis_title="Failure Rate (%)",
         yaxis_title="",
         xaxis=dict(range=[0, max(stats["error_rate"].max() * 1.2, 10)]),
+        yaxis=dict(autorange="reversed"),
     )
     return apply_plotly_theme(fig)
 
@@ -1859,7 +1893,7 @@ def build_filter_bar(df):
     Returns:
         dbc.Row: Row of filter dropdowns.
     """
-    models = sorted(df["model"].unique()) if not df.empty else []
+    models = _sort_model_names(df["model"].unique()) if not df.empty else []
     roots = sorted(df["root"].unique()) if not df.empty else []
     scales = sorted(df["scale"].unique()) if not df.empty else []
     variations = sorted(df["variation"].unique()) if not df.empty else []

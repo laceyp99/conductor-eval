@@ -341,3 +341,70 @@ def test_latency_distribution_hover_omits_fence_statistics():
     assert "latency: %{y:.2f}s" in hover
     assert "upper fence" not in hover
     assert "lower fence" not in hover
+
+
+def test_model_variants_share_base_model_and_effort_order_across_charts():
+    models = [
+        "zeta (medium)",
+        "alpha (high)",
+        "alpha (none)",
+        "zeta (low)",
+        "alpha (max)",
+        "alpha (low)",
+        "alpha (medium)",
+    ]
+    df = pd.DataFrame(
+        [
+            {
+                "model": model,
+                "root": "C",
+                "overall_pass": index % 2 == 0,
+                "api_latency": float(index + 1),
+                "cost": float(index + 1),
+                "has_error": index % 2 == 1,
+            }
+            for index, model in enumerate(models)
+        ]
+    )
+    expected = [
+        "alpha (none)",
+        "alpha (low)",
+        "alpha (medium)",
+        "alpha (high)",
+        "alpha (max)",
+        "zeta (low)",
+        "zeta (medium)",
+    ]
+
+    assert [trace.name for trace in build_latency_box(df).data] == expected
+    pass_rate = build_pass_rate_by_model(df)
+    assert list(pass_rate.data[0].y) == expected
+    assert pass_rate.layout.yaxis.autorange == "reversed"
+    assert list(build_cost_by_model(df).data[0].y) == expected
+    assert list(build_failure_rate_by_model(df).data[0].y) == expected
+    heatmap = build_model_root_heatmap(df)
+    assert list(heatmap.data[0].y) == expected
+    assert heatmap.layout.yaxis.autorange == "reversed"
+
+
+def test_model_variant_order_has_deterministic_fallbacks():
+    models = [
+        "beta",
+        "alpha (turbo)",
+        "alpha (low)",
+        "alpha",
+        "alpha (experimental)",
+        "alpha (none)",
+    ]
+    df = pd.DataFrame(
+        [{"model": model, "api_latency": float(index)} for index, model in enumerate(models)]
+    )
+
+    assert [trace.name for trace in build_latency_box(df).data] == [
+        "alpha",
+        "alpha (none)",
+        "alpha (low)",
+        "alpha (experimental)",
+        "alpha (turbo)",
+        "beta",
+    ]
