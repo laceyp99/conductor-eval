@@ -20,6 +20,8 @@ from conductor_core.music import (
 )
 from dash import Input, Output, dcc, html
 
+from conductor_eval.paths import get_evaluations_dir
+
 PLOTLY_BG = "#1a1a2e"
 PLOTLY_GRID = "#2a2a4a"
 PLOTLY_TEXT = "#e0e0e0"
@@ -48,7 +50,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MODEL_COLORS = px.colors.qualitative.Set2
-DEFAULT_EVALUATIONS_DIR = Path("evaluations")
 _MAX_SCATTER_LABEL_LENGTH = 24
 MODEL_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
@@ -590,31 +591,36 @@ def load_run(run_path):
     return df, config, summary
 
 
-def list_available_runs(base_dir=DEFAULT_EVALUATIONS_DIR):
+def list_available_runs(base_dir=None):
     """List available evaluation runs in the base directory.
 
     Args:
-        base_dir (str): Base directory containing run subdirectories.
+        base_dir (str | Path | None): Base directory containing run
+            subdirectories. Uses Eval's default evaluations directory when
+            omitted.
 
     Returns:
         list[Path]: Sorted list of run directory paths.
     """
-    base = Path(base_dir)
+    base = get_evaluations_dir() if base_dir is None else Path(base_dir)
     if not base.exists():
         return []
     runs = [d for d in sorted(base.iterdir()) if d.is_dir() and (d / "config.json").exists()]
     return runs
 
 
-def select_run_interactive(base_dir=DEFAULT_EVALUATIONS_DIR):
+def select_run_interactive(base_dir=None):
     """Prompt user to select a run from available runs.
 
     Args:
-        base_dir (str): Base directory containing run subdirectories.
+        base_dir (str | Path | None): Base directory containing run
+            subdirectories. Uses Eval's default evaluations directory when
+            omitted.
 
     Returns:
         Path: Selected run directory path.
     """
+    base_dir = get_evaluations_dir() if base_dir is None else Path(base_dir)
     runs = list_available_runs(base_dir)
     if not runs:
         print(f"No evaluation runs found in '{base_dir}/'")
@@ -2837,7 +2843,7 @@ def main():
         # Support both full path and just run name
         if not os.path.isdir(run_path):
             # Try the evaluator's default output directory.
-            candidate = DEFAULT_EVALUATIONS_DIR / run_path
+            candidate = get_evaluations_dir() / run_path
             if os.path.isdir(candidate):
                 run_path = candidate
             else:
