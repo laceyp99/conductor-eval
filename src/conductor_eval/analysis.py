@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_COLORS = px.colors.qualitative.Set2
 DEFAULT_EVALUATIONS_DIR = Path("evaluations")
+_MAX_SCATTER_LABEL_LENGTH = 24
 
 # Plotly textposition options mapped to angles (degrees, counter-clockwise from +x axis).
 # The label is placed in the direction of the angle relative to the marker.
@@ -65,11 +66,13 @@ _TEXT_POSITIONS = [
 
 
 def compute_text_positions(x_vals, y_vals):
-    """Compute per-point textposition strings to minimize label overlap on scatter plots.
+    """Compute boundary-aware text positions that minimize scatter-label overlap.
 
     Uses a repulsion-based approach: for each point, computes a net repulsion vector
     from all other points (weighted by inverse squared distance in normalized space),
     then places the label in the direction that points away from the densest region.
+    Labels near horizontal extremes are directed inward so their text remains in the
+    plotting area.
 
     Args:
         x_vals (list | pd.Series): X coordinates of the scatter points.
@@ -90,10 +93,8 @@ def compute_text_positions(x_vals, y_vals):
     # Normalize to [0, 1] so x and y distances are comparable
     x_min, x_max = min(xs), max(xs)
     y_min, y_max = min(ys), max(ys)
-    x_range = x_max - x_min if x_max != x_min else 1.0
-    y_range = y_max - y_min if y_max != y_min else 1.0
-    xn = [(v - x_min) / x_range for v in xs]
-    yn = [(v - y_min) / y_range for v in ys]
+    xn = [(v - x_min) / (x_max - x_min) for v in xs] if x_max != x_min else [0.5] * n
+    yn = [(v - y_min) / (y_max - y_min) for v in ys] if y_max != y_min else [0.5] * n
 
     positions = []
     for i in range(n):
@@ -131,9 +132,36 @@ def compute_text_positions(x_vals, y_vals):
             if diff < best_diff:
                 best_diff = diff
                 best_pos = pos_name
+        if xn[i] <= 0.1:
+            best_pos = {
+                "top left": "top right",
+                "top center": "top right",
+                "middle left": "middle right",
+                "bottom left": "bottom right",
+                "bottom center": "bottom right",
+            }.get(best_pos, best_pos)
+        elif xn[i] >= 0.9:
+            best_pos = {
+                "top right": "top left",
+                "top center": "top left",
+                "middle right": "middle left",
+                "bottom right": "bottom left",
+                "bottom center": "bottom left",
+            }.get(best_pos, best_pos)
         positions.append(best_pos)
 
     return positions
+
+
+def _compact_model_label(model):
+    """Shorten long chart labels while preserving identifying prefixes and suffixes."""
+    label = str(model)
+    if len(label) <= _MAX_SCATTER_LABEL_LENGTH:
+        return label
+
+    prefix_length = (_MAX_SCATTER_LABEL_LENGTH - 1) // 2
+    suffix_length = _MAX_SCATTER_LABEL_LENGTH - prefix_length - 1
+    return f"{label[:prefix_length]}…{label[-suffix_length:]}"
 
 
 def load_run(run_path):
@@ -971,10 +999,11 @@ def build_latency_vs_pass(df):
             x=stats["avg_latency"],
             y=stats["pass_rate"],
             mode="markers+text",
-            text=stats["model"],
+            text=[_compact_model_label(model) for model in stats["model"]],
             textposition=text_positions,
+            customdata=stats["model"],
             hovertemplate=(
-                "Model: %{text}<br>Average latency: %{x:.2f}s<br>"
+                "Model: %{customdata}<br>Average latency: %{x:.2f}s<br>"
                 "Pass rate: %{y:.1f}%<extra></extra>"
             ),
             marker=dict(
@@ -1089,10 +1118,11 @@ def build_cost_vs_pass(df):
             x=stats["cost_per_gen"],
             y=stats["pass_rate"],
             mode="markers+text",
-            text=stats["model"],
+            text=[_compact_model_label(model) for model in stats["model"]],
             textposition=text_positions,
+            customdata=stats["model"],
             hovertemplate=(
-                "Model: %{text}<br>Cost per generation: $%{x:.5f}<br>"
+                "Model: %{customdata}<br>Cost per generation: $%{x:.5f}<br>"
                 "Pass rate: %{y:.1f}%<extra></extra>"
             ),
             marker=dict(
