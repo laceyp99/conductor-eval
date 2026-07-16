@@ -99,18 +99,20 @@ _TEXT_POSITIONS = [
 ]
 
 
-def compute_text_positions(x_vals, y_vals):
+def compute_text_positions(x_vals, y_vals, y_bounds=None):
     """Compute boundary-aware text positions that minimize scatter-label overlap.
 
     Uses a repulsion-based approach: for each point, computes a net repulsion vector
     from all other points (weighted by inverse squared distance in normalized space),
     then places the label in the direction that points away from the densest region.
-    Labels near horizontal extremes are directed inward so their text remains in the
-    plotting area.
+    Labels near horizontal or vertical extremes are directed inward so their text
+    remains in the plotting area.
 
     Args:
         x_vals (list | pd.Series): X coordinates of the scatter points.
         y_vals (list | pd.Series): Y coordinates of the scatter points.
+        y_bounds (tuple[float, float] | None): Visible y-axis bounds. When provided,
+            boundary checks use the plot range instead of the observed data range.
 
     Returns:
         list[str]: A list of Plotly textposition strings, one per point.
@@ -121,12 +123,12 @@ def compute_text_positions(x_vals, y_vals):
     ys = list(y_vals)
     n = len(xs)
 
-    if n <= 1:
-        return ["top center"] * n
+    if not n:
+        return []
 
     # Normalize to [0, 1] so x and y distances are comparable
     x_min, x_max = min(xs), max(xs)
-    y_min, y_max = min(ys), max(ys)
+    y_min, y_max = y_bounds if y_bounds is not None else (min(ys), max(ys))
     xn = [(v - x_min) / (x_max - x_min) for v in xs] if x_max != x_min else [0.5] * n
     yn = [(v - y_min) / (y_max - y_min) for v in ys] if y_max != y_min else [0.5] * n
 
@@ -150,22 +152,20 @@ def compute_text_positions(x_vals, y_vals):
             rx += dx * weight
             ry += dy * weight
 
-        if abs(rx) < 1e-9 and abs(ry) < 1e-9:
-            positions.append("top center")
-            continue
-
-        angle = math.degrees(math.atan2(ry, rx)) % 360
-
-        # Find the closest named position
         best_pos = "top center"
-        best_diff = 360.0
-        for ref_angle, pos_name in _TEXT_POSITIONS:
-            diff = abs(angle - ref_angle)
-            if diff > 180:
-                diff = 360 - diff
-            if diff < best_diff:
-                best_diff = diff
-                best_pos = pos_name
+        if abs(rx) >= 1e-9 or abs(ry) >= 1e-9:
+            angle = math.degrees(math.atan2(ry, rx)) % 360
+
+            # Find the closest named position
+            best_diff = 360.0
+            for ref_angle, pos_name in _TEXT_POSITIONS:
+                diff = abs(angle - ref_angle)
+                if diff > 180:
+                    diff = 360 - diff
+                if diff < best_diff:
+                    best_diff = diff
+                    best_pos = pos_name
+
         if xn[i] <= 0.1:
             best_pos = {
                 "top left": "top right",
@@ -182,9 +182,196 @@ def compute_text_positions(x_vals, y_vals):
                 "bottom right": "bottom left",
                 "bottom center": "bottom left",
             }.get(best_pos, best_pos)
+
+        if yn[i] <= 0.1:
+            best_pos = {
+                "bottom left": "top left",
+                "bottom center": "top center",
+                "bottom right": "top right",
+            }.get(best_pos, best_pos)
+        elif yn[i] >= 0.9:
+            best_pos = {
+                "top left": "bottom left",
+                "top center": "bottom center",
+                "top right": "bottom right",
+            }.get(best_pos, best_pos)
+
         positions.append(best_pos)
 
     return positions
+
+
+def _padded_axis_bounds(values, padding=0.08):
+    """Return deterministic numeric bounds with room around the outer markers."""
+    values = list(values)
+    value_min = min(values)
+    value_max = max(values)
+    span = value_max - value_min
+    if span == 0:
+        span = max(abs(value_min) * 0.1, 1.0)
+    return value_min - span * padding, value_max + span * padding
+
+
+def _label_rectangles_overlap(first, second, margin=0.006):
+    """Return whether two normalized label rectangles overlap."""
+    return not (
+        first[1] + margin <= second[0]
+        or second[1] + margin <= first[0]
+        or first[3] + margin <= second[2]
+        or second[3] + margin <= first[2]
+    )
+
+
+def compute_scatter_label_layout(
+    x_vals,
+    y_vals,
+    labels,
+    *,
+    x_bounds=None,
+    y_bounds=None,
+    plot_width=600,
+    plot_height=340,
+):
+    """Place scatter labels inside the plot without overlapping one another.
+
+    The search works in normalized plot coordinates so x/y units do not affect
+    collision detection. Labels are greedily assigned the closest available slot,
+    with crowded points and wider labels placed first. The returned rectangles are
+    useful for regression tests and are not passed to Plotly.
+    """
+    xs = list(x_vals)
+    ys = list(y_vals)
+    labels = [str(label) for label in labels]
+    if not (len(xs) == len(ys) == len(labels)):
+        raise ValueError("x values, y values, and labels must have equal lengths")
+    if not xs:
+        return []
+
+    x_bounds = x_bounds or _padded_axis_bounds(xs)
+    y_bounds = y_bounds or _padded_axis_bounds(ys)
+    x_min, x_max = x_bounds
+    y_min, y_max = y_bounds
+    x_span = x_max - x_min
+    y_span = y_max - y_min
+    xn = [(value - x_min) / x_span for value in xs]
+    yn = [(value - y_min) / y_span for value in ys]
+    preferred = compute_text_positions(xs, ys, y_bounds=y_bounds)
+    direction_by_position = {
+        "middle right": (1, 0),
+        "top right": (1, 1),
+        "top center": (0, 1),
+        "top left": (-1, 1),
+        "middle left": (-1, 0),
+        "bottom left": (-1, -1),
+        "bottom center": (0, -1),
+        "bottom right": (1, -1),
+    }
+
+    widths = [min(0.45, max(0.08, (len(label) * 6.4 + 10) / plot_width)) for label in labels]
+    height = 18 / plot_height
+    crowding = [
+        sum(
+            1
+            for other in range(len(xs))
+            if other != index and (xn[index] - xn[other]) ** 2 + (yn[index] - yn[other]) ** 2 < 0.04
+        )
+        for index in range(len(xs))
+    ]
+    placement_order = sorted(
+        range(len(xs)),
+        key=lambda index: (-crowding[index], -widths[index], index),
+    )
+
+    placed_rectangles = []
+    layouts = [None] * len(xs)
+    grid_steps = 80
+    for index in placement_order:
+        width = widths[index]
+        half_width = width / 2
+        half_height = height / 2
+        preferred_x, preferred_y = direction_by_position[preferred[index]]
+        candidates = []
+
+        for y_step in range(grid_steps + 1):
+            center_y = half_height + (1 - height) * y_step / grid_steps
+            for x_step in range(grid_steps + 1):
+                center_x = half_width + (1 - width) * x_step / grid_steps
+                dx = center_x - xn[index]
+                dy = center_y - yn[index]
+                distance = dx * dx + dy * dy
+                magnitude = (distance**0.5) or 1.0
+                alignment = (dx * preferred_x + dy * preferred_y) / magnitude
+                candidates.append((distance - alignment * 0.002, center_x, center_y))
+
+        candidates.sort(key=lambda candidate: (candidate[0], candidate[2], candidate[1]))
+        for _, center_x, center_y in candidates:
+            rectangle = (
+                center_x - half_width,
+                center_x + half_width,
+                center_y - half_height,
+                center_y + half_height,
+            )
+            if any(_label_rectangles_overlap(rectangle, placed) for placed in placed_rectangles):
+                continue
+
+            placed_rectangles.append(rectangle)
+            layouts[index] = {
+                "point_x": xs[index],
+                "point_y": ys[index],
+                "label_x": x_min + center_x * x_span,
+                "label_y": y_min + center_y * y_span,
+                "text": labels[index],
+                "rect": rectangle,
+            }
+            break
+
+        if layouts[index] is None:
+            raise ValueError("scatter plot is too crowded to place every label without overlap")
+
+    return layouts
+
+
+def _add_scatter_labels(
+    fig,
+    x_vals,
+    y_vals,
+    labels,
+    *,
+    x_bounds,
+    y_bounds=(0, 105),
+    plot_width=600,
+):
+    """Add collision-aware Plotly annotations with leader lines."""
+    compact_labels = [_compact_model_label(label) for label in labels]
+    layouts = compute_scatter_label_layout(
+        x_vals,
+        y_vals,
+        compact_labels,
+        x_bounds=x_bounds,
+        y_bounds=y_bounds,
+        plot_width=plot_width,
+    )
+    for layout in layouts:
+        fig.add_annotation(
+            x=layout["point_x"],
+            y=layout["point_y"],
+            ax=layout["label_x"],
+            ay=layout["label_y"],
+            xref="x",
+            yref="y",
+            axref="x",
+            ayref="y",
+            text=layout["text"],
+            showarrow=True,
+            arrowhead=0,
+            arrowsize=0.5,
+            arrowwidth=0.75,
+            arrowcolor="#888",
+            standoff=5,
+            bgcolor="rgba(26, 26, 46, 0.88)",
+            borderpad=1,
+            font=dict(size=11, color=PLOTLY_TEXT),
+        )
 
 
 def _compact_model_label(model):
@@ -1032,15 +1219,13 @@ def build_latency_vs_pass(df):
     )
     stats["pass_rate"] = (stats["pass_rate"] * 100).round(1)
     stats = _sort_by_model(stats)
+    x_bounds = _padded_axis_bounds(stats["avg_latency"])
 
-    text_positions = compute_text_positions(stats["avg_latency"], stats["pass_rate"])
     fig = go.Figure(
         go.Scatter(
             x=stats["avg_latency"],
             y=stats["pass_rate"],
-            mode="markers+text",
-            text=[_compact_model_label(model) for model in stats["model"]],
-            textposition=text_positions,
+            mode="markers",
             customdata=stats["model"],
             hovertemplate=(
                 "Model: %{customdata}<br>Average latency: %{x:.2f}s<br>"
@@ -1052,10 +1237,19 @@ def build_latency_vs_pass(df):
             ),
         )
     )
+    _add_scatter_labels(
+        fig,
+        stats["avg_latency"],
+        stats["pass_rate"],
+        stats["model"],
+        x_bounds=x_bounds,
+        plot_width=900,
+    )
     fig.update_layout(
         title="Latency vs Pass Rate by Model",
         xaxis_title="Average Latency (seconds)",
         yaxis_title="Pass Rate (%)",
+        xaxis=dict(range=list(x_bounds)),
         yaxis=dict(range=[0, 105]),
     )
     return apply_plotly_theme(fig)
@@ -1153,15 +1347,13 @@ def build_cost_vs_pass(df):
     stats["cost_per_gen"] = stats["total_cost"] / stats["tested"]
     stats["pass_rate"] = (stats["pass_rate"] * 100).round(1)
     stats = _sort_by_model(stats)
+    x_bounds = _padded_axis_bounds(stats["cost_per_gen"])
 
-    text_positions = compute_text_positions(stats["cost_per_gen"], stats["pass_rate"])
     fig = go.Figure(
         go.Scatter(
             x=stats["cost_per_gen"],
             y=stats["pass_rate"],
-            mode="markers+text",
-            text=[_compact_model_label(model) for model in stats["model"]],
-            textposition=text_positions,
+            mode="markers",
             customdata=stats["model"],
             hovertemplate=(
                 "Model: %{customdata}<br>Cost per generation: $%{x:.5f}<br>"
@@ -1173,10 +1365,19 @@ def build_cost_vs_pass(df):
             ),
         )
     )
+    _add_scatter_labels(
+        fig,
+        stats["cost_per_gen"],
+        stats["pass_rate"],
+        stats["model"],
+        x_bounds=x_bounds,
+        plot_width=520,
+    )
     fig.update_layout(
         title="Cost per Generation vs Pass Rate",
         xaxis_title="Cost per Generation ($)",
         yaxis_title="Pass Rate (%)",
+        xaxis=dict(range=list(x_bounds)),
         yaxis=dict(range=[0, 105]),
     )
     return apply_plotly_theme(fig)
@@ -1763,6 +1964,7 @@ def build_reasoning_cost_effectiveness(df):
     stats["cost_per_gen"] = stats["total_cost"] / stats["tested"]
     stats["pass_rate_pct"] = (stats["pass_rate"] * 100).round(1)
     stats = _sort_by_model(stats)
+    x_bounds = _padded_axis_bounds(stats["cost_per_gen"])
 
     # Assign colors per base_model
     base_models = _sort_model_names(stats["base_model"].unique())
@@ -1786,10 +1988,6 @@ def build_reasoning_cost_effectiveness(df):
                 )
             )
 
-    # Compute text positions across ALL points before splitting into per-model traces
-    all_text_positions = compute_text_positions(stats["cost_per_gen"], stats["pass_rate_pct"])
-    stats["_text_pos"] = all_text_positions
-
     # Draw scatter points
     for base in base_models:
         bm_stats = stats[stats["base_model"] == base]
@@ -1797,25 +1995,37 @@ def build_reasoning_cost_effectiveness(df):
             go.Scatter(
                 x=bm_stats["cost_per_gen"],
                 y=bm_stats["pass_rate_pct"],
-                mode="markers+text",
+                mode="markers",
                 name=base,
-                text=bm_stats["model"],
-                textposition=list(bm_stats["_text_pos"]),
                 customdata=list(
-                    zip(bm_stats["passed"].astype(int), bm_stats["tested"].astype(int))
+                    zip(
+                        bm_stats["model"],
+                        bm_stats["passed"].astype(int),
+                        bm_stats["tested"].astype(int),
+                    )
                 ),
-                hovertemplate=_rate_hover_template(
-                    "Model: %{text}<br>Cost per generation: $%{x:.5f}",
-                    denominator_label="Generations",
+                hovertemplate=(
+                    "Model: %{customdata[0]}<br>Cost per generation: $%{x:.5f}<br>"
+                    "Pass rate: %{y:.1f}%<br>Passed: %{customdata[1]}<br>"
+                    "Generations: %{customdata[2]}<extra></extra>"
                 ),
                 marker=dict(size=12, color=color_map[base]),
             )
         )
 
+    _add_scatter_labels(
+        fig,
+        stats["cost_per_gen"],
+        stats["pass_rate_pct"],
+        stats["model"],
+        x_bounds=x_bounds,
+        plot_width=850,
+    )
     fig.update_layout(
         title="Reasoning Cost-Effectiveness (Cost per Generation vs Pass Rate)",
         xaxis_title="Cost per Generation ($)",
         yaxis_title="Pass Rate (%)",
+        xaxis=dict(range=list(x_bounds)),
         yaxis=dict(range=[0, 105]),
     )
     return apply_plotly_theme(fig)
