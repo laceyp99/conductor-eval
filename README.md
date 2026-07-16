@@ -7,14 +7,6 @@ fast local checks of deterministic Eval code paths. Use the evaluator when you
 want to measure prompt-to-model behavior, musical validity, latency, cost, or
 reasoning-mode differences across real models.
 
-## File Reference
-
-| File | Description |
-|------|-------------|
-| `evaluator.py` | Main `Evaluator` class -- orchestrates generation, testing, and result saving |
-| `checks.py` | MIDI validation functions (`scale_test`, `duration_test`) |
-| `analysis.py` | Interactive Plotly Dash dashboard (up to 8 tabs, up to 22 charts, global filters, export) |
-
 ## Installation
 
 From the `conductor-eval` project directory, create a virtual environment,
@@ -50,6 +42,57 @@ results = evaluator.evaluate(
 )
 ```
 
+By default, Eval stores mutable data under
+`~/.conductor/eval/evaluations/`. This location is independent of the checkout,
+current working directory, virtual environment, and installed package path.
+
+### Data Directory
+
+Conductor projects share `~/.conductor` as their default suite root. Eval owns
+the stable `eval` project directory beneath that root:
+
+```text
+~/.conductor/
+└── eval/
+    └── evaluations/
+        ├── run.log
+        └── <timestamp>_<run-name>/
+```
+
+The directory precedence, from highest to lowest, is:
+
+1. `CONDUCTOR_EVAL_HOME`: the complete Eval data directory.
+2. `CONDUCTOR_HOME`: the suite root; Eval appends `eval`.
+3. `Path.home() / ".conductor" / "eval"`.
+
+Both environment-variable paths support `~` expansion. An explicit
+`Evaluator(output_dir=...)` remains narrower than these defaults and writes to
+the exact directory supplied.
+
+PowerShell examples:
+
+```powershell
+# Put every Conductor project's data beneath another suite root.
+$env:CONDUCTOR_HOME = "D:\ConductorData"
+# Eval now defaults to D:\ConductorData\eval\evaluations
+
+# Or override Eval alone with its complete project data directory.
+$env:CONDUCTOR_EVAL_HOME = "D:\ConductorEvalData"
+# Eval now defaults to D:\ConductorEvalData\evaluations
+```
+
+Path resolution and package import do not create directories. Eval creates
+them only when it initializes its existing file logging or writes a run. This
+change does not move, overwrite, or delete existing checkout-local
+`evaluations/` or `runs/` directories; pass one explicitly as `output_dir` to
+continue portable or legacy operation.
+
+Evaluation data can be large because every run retains Core generation
+artifacts and also copies report MIDI and messages; dashboard exports add HTML
+files. Storage grows with prompts × roots × two scales × model variants. Review
+and remove complete, unneeded runs manually; Eval performs no automatic
+migration or cleanup.
+
 ### Direct Script Safeguard
 
 Running `py -3.12 -m conductor_eval.evaluator` directly is guarded because the
@@ -70,7 +113,7 @@ name explicitly.
 .\.venv\Scripts\python.exe -m conductor_eval.analysis
 
 # Direct path to a run
-.\.venv\Scripts\python.exe -m conductor_eval.analysis evaluations/20260210_224954_arpeggiator_local_pt
+.\.venv\Scripts\python.exe -m conductor_eval.analysis "$HOME\.conductor\eval\evaluations\20260210_224954_arpeggiator_local"
 ```
 
 The dashboard opens at `http://127.0.0.1:8050/`.
@@ -166,15 +209,21 @@ results = evaluator.evaluate(
 |------|-------------|----------------|
 | `scale` | Validates notes belong to the specified scale | Always uses root/scale from prompt |
 | `duration` | Validates note durations match expected value | Detects from keywords: `quarter`, `eighth`, `sixteenth`, `16th`, `8th`, `half`, `whole` |
+| `monophony` | Validates that completed notes never overlap | None; no parameters required |
+| `polyphony` | Validates that the MIDI reaches a minimum number of simultaneous voices | None; set `min_voices` in `test_params` (default: `2`) |
+| `chord_progression` | Validates diatonic chord pitch classes at fixed harmonic boundaries | None; set `progression` and optional `beats_per_chord`/`strict` in `test_params`; root and scale are supplied automatically |
+| `harmonic_rhythm` | Validates that completed notes begin only at the expected beat positions | None; set `expected_onsets` in `test_params` |
+| `chord_event_positions` | Validates that every completed note uses an expected start/end beat pair | None; set `expected_starts` and `expected_ends` in `test_params` |
 
-The `scale` test always runs since root and scale are always applied to prompts. Duration keywords are owned by `conductor_core.music` as `DURATION_KEYWORDS` and shared with the evaluator.
+The `scale` test always runs since root and scale are always applied to prompts. Duration keywords are owned by `conductor_core.music` as `DURATION_KEYWORDS` and shared with the evaluator. Parameters for the other tests are passed through `test_params`, keyed by test name.
 
 ### Output Structure
 
-Each evaluation run creates a timestamped directory:
+Each evaluation run creates a timestamped directory beneath Eval's data
+directory (shown here with the default suite root):
 
 ```
-evaluations/
+~/.conductor/eval/evaluations/
 └── 20260210_224954_my_first_eval/
     ├── config.json                    # Full evaluation configuration
     ├── summary.json                   # Aggregated results + statistics
@@ -359,10 +408,10 @@ All charts update in real time when filters change.
 
 ### Exporting
 
-Click the **Export Dashboard** button to save all charts as individual HTML files plus a combined `dashboard.html` to `evaluations/<run>/analysis/`. The number of exported charts depends on the run's features (16 base charts, plus 3 for reasoning when applicable):
+Click the **Export Dashboard** button to save all charts as individual HTML files plus a combined `dashboard.html` to `<evaluations-dir>/<run>/analysis/`. The number of exported charts depends on the run's features (16 base charts, plus 3 for reasoning when applicable):
 
 ```
-evaluations/20260210_224954_arpeggiator_local_pt/
+~/.conductor/eval/evaluations/20260210_224954_arpeggiator_local/
 └── analysis/
     ├── dashboard.html              # Combined single-page dashboard
     ├── pass_rate_by_model.html

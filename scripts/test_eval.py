@@ -9,8 +9,10 @@ Before running it:
     2. Start Ollama and make sure the models below are installed.
     3. Run ``.\\.venv\\Scripts\\python.exe scripts\test_eval.py`` from the repo root.
 
-Results are written beneath ``evaluations/`` using the evaluator's timestamped
-run-directory layout.
+Results are written beneath Eval's default
+``~/.conductor/eval/evaluations/`` directory using the evaluator's timestamped
+run-directory layout. ``CONDUCTOR_EVAL_HOME`` and ``CONDUCTOR_HOME`` can
+override that location.
 """
 
 from conductor_eval import Evaluator
@@ -37,7 +39,8 @@ def main() -> None:
         # Explicit local model names prevent an accidental broad or paid run.
         # Replace these values with model names installed in your Ollama setup.
         models=["llama3.2:1b", "granite4.1:3b"],
-        # The run name becomes part of evaluations/<timestamp>_<run_name>/.
+        # The run name becomes part of evaluations/<timestamp>_<run_name>/
+        # beneath Eval's resolved data directory.
         run_name="test_eval",
     )
 

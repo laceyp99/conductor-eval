@@ -33,6 +33,7 @@ from conductor_eval.checks import (
     polyphony_test,
     scale_test,
 )
+from conductor_eval.paths import get_evaluations_dir
 
 DIRECT_EVALUATION_CONFIRMATION = "RUN CLOUD EVALUATION"
 
@@ -142,17 +143,18 @@ class Evaluator:
 
     def __init__(
         self,
-        output_dir: str | Path = "evaluations",
+        output_dir: str | Path | None = None,
         temperature: float = 0.0,
     ):
         """
         Initialize the Evaluator.
 
         Args:
-            output_dir: Base directory for all evaluation outputs.
+            output_dir: Base directory for all evaluation outputs. Defaults to
+                the ``evaluations`` subdirectory in Eval's data directory.
             temperature: Default temperature for generation.
         """
-        self.output_dir = Path(output_dir)
+        self.output_dir = get_evaluations_dir() if output_dir is None else Path(output_dir)
         self.temperature = temperature
         self.console = Console(force_terminal=True)
         self._setup_logging()
