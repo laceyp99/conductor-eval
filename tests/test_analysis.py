@@ -17,6 +17,7 @@ from conductor_eval.analysis import (
     build_model_root_heatmap,
     build_pass_rate_by_model,
     build_texture_performance_by_model,
+    compute_scatter_label_layout,
     compute_text_positions,
     load_run,
 )
@@ -293,6 +294,51 @@ def test_scatter_text_positions_point_inward_at_horizontal_boundaries():
     assert positions[-1].endswith("left")
 
 
+def test_scatter_text_positions_point_inward_at_vertical_boundaries():
+    positions = compute_text_positions(
+        [0.5, 0.5, 0.5],
+        [0.0, 50.0, 100.0],
+        y_bounds=(0, 105),
+    )
+
+    assert positions[0].startswith("top")
+    assert positions[-1].startswith("bottom")
+
+
+def test_scatter_text_position_handles_single_point_at_top_boundary():
+    positions = compute_text_positions([0.5], [100.0], y_bounds=(0, 105))
+
+    assert positions == ["bottom center"]
+
+
+def test_scatter_label_layout_stays_in_bounds_without_collisions():
+    x_values = [0.008, 0.0085, 0.009, 0.0095, 0.010, 0.018, 0.0182, 0.019, 0.022, 0.023]
+    y_values = [80, 90, 100, 100, 100, 60, 60, 80, 90, 100]
+    labels = [f"gpt-5.6-model ({effort})" for effort in range(len(x_values))]
+    layouts = compute_scatter_label_layout(
+        x_values,
+        y_values,
+        labels,
+        x_bounds=(0.005, 0.025),
+        y_bounds=(0, 105),
+        plot_width=520,
+    )
+
+    rectangles = [layout["rect"] for layout in layouts]
+    assert all(
+        left >= 0 and right <= 1 and bottom >= 0 and top <= 1
+        for left, right, bottom, top in rectangles
+    )
+    for index, first in enumerate(rectangles):
+        for second in rectangles[index + 1 :]:
+            assert (
+                first[1] <= second[0]
+                or second[1] <= first[0]
+                or first[3] <= second[2]
+                or second[3] <= first[2]
+            )
+
+
 def test_tradeoff_charts_compact_long_labels_and_keep_full_names_in_hover():
     long_model = "provider/model-with-an-unusually-long-version-identifier"
     df = pd.DataFrame(
@@ -315,9 +361,13 @@ def test_tradeoff_charts_compact_long_labels_and_keep_full_names_in_hover():
     for figure in (build_latency_vs_pass(df), build_cost_vs_pass(df)):
         trace = figure.data[0]
         long_model_index = list(trace.customdata).index(long_model)
+        compact_annotation = next(
+            annotation for annotation in figure.layout.annotations if "…" in annotation.text
+        )
 
-        assert len(trace.text[long_model_index]) == 24
-        assert "…" in trace.text[long_model_index]
+        assert trace.mode == "markers"
+        assert len(compact_annotation.text) == 24
+        assert len(figure.layout.annotations) == 2
         assert trace.customdata[long_model_index] == long_model
         assert "Model: %{customdata}" in trace.hovertemplate
 
@@ -378,3 +428,70 @@ def test_latency_distribution_hover_omits_fence_statistics():
     assert "latency: %{y:.2f}s" in hover
     assert "upper fence" not in hover
     assert "lower fence" not in hover
+
+
+def test_model_variants_share_base_model_and_effort_order_across_charts():
+    models = [
+        "zeta (medium)",
+        "alpha (high)",
+        "alpha (none)",
+        "zeta (low)",
+        "alpha (max)",
+        "alpha (low)",
+        "alpha (medium)",
+    ]
+    df = pd.DataFrame(
+        [
+            {
+                "model": model,
+                "root": "C",
+                "overall_pass": index % 2 == 0,
+                "api_latency": float(index + 1),
+                "cost": float(index + 1),
+                "has_error": index % 2 == 1,
+            }
+            for index, model in enumerate(models)
+        ]
+    )
+    expected = [
+        "alpha (none)",
+        "alpha (low)",
+        "alpha (medium)",
+        "alpha (high)",
+        "alpha (max)",
+        "zeta (low)",
+        "zeta (medium)",
+    ]
+
+    assert [trace.name for trace in build_latency_box(df).data] == expected
+    pass_rate = build_pass_rate_by_model(df)
+    assert list(pass_rate.data[0].y) == expected
+    assert pass_rate.layout.yaxis.autorange == "reversed"
+    assert list(build_cost_by_model(df).data[0].y) == expected
+    assert list(build_failure_rate_by_model(df).data[0].y) == expected
+    heatmap = build_model_root_heatmap(df)
+    assert list(heatmap.data[0].y) == expected
+    assert heatmap.layout.yaxis.autorange == "reversed"
+
+
+def test_model_variant_order_has_deterministic_fallbacks():
+    models = [
+        "beta",
+        "alpha (turbo)",
+        "alpha (low)",
+        "alpha",
+        "alpha (experimental)",
+        "alpha (none)",
+    ]
+    df = pd.DataFrame(
+        [{"model": model, "api_latency": float(index)} for index, model in enumerate(models)]
+    )
+
+    assert [trace.name for trace in build_latency_box(df).data] == [
+        "alpha",
+        "alpha (none)",
+        "alpha (low)",
+        "alpha (experimental)",
+        "alpha (turbo)",
+        "beta",
+    ]
