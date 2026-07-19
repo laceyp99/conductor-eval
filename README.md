@@ -170,6 +170,10 @@ The `models` parameter accepts several formats:
 | `"ollama"` | All local Ollama models |
 | `["gpt-5", "claude-sonnet-4-6"]` | Specific models by name |
 
+Eval uses provider metadata to organize batches and reports, but generation
+requests identify only the selected model. Conductor Core resolves the actual
+provider route and records that provider with its generation artifacts.
+
 ### Testing Reasoning Variations
 
 When `test_reasoning=True`, the evaluator tests all thinking modes and effort levels for compatible models:
