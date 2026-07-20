@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 from collections import defaultdict
+from html import escape
 from pathlib import Path
 
 import dash
@@ -2798,6 +2799,8 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
     total = len(df)
     passed = int(df["overall_pass"].sum())
     pass_rate = round(passed / total * 100, 1) if total > 0 else 0
+    escaped_run_name = escape(str(run_name))
+    escaped_timestamp = escape(str(timestamp))
 
     chart_divs = []
     for name, fig in figures.items():
@@ -2809,7 +2812,7 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Conductor Eval Dashboard: {run_name}</title>
+    <title>Conductor Eval Dashboard: {escaped_run_name}</title>
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <style>
         body {{ background-color: {PLOTLY_BG}; color: {PLOTLY_TEXT}; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; }}
@@ -2823,8 +2826,8 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
     </style>
 </head>
 <body>
-    <h1>Conductor Evaluation Dashboard: {run_name}</h1>
-    <p style="color: #666">Run: {timestamp} | {total} generations | {len(df["model"].unique())} models</p>
+    <h1>Conductor Evaluation Dashboard: {escaped_run_name}</h1>
+    <p style="color: #666">Run: {escaped_timestamp} | {total} generations | {len(df["model"].unique())} models</p>
     <div class="stats">
         <div class="stat-card"><div class="label">Total</div><div class="value">{total}</div></div>
         <div class="stat-card"><div class="label">Pass Rate</div><div class="value" style="color: {"#2ecc71" if pass_rate >= 50 else "#e74c3c"}">{pass_rate}%</div></div>
