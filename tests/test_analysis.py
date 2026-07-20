@@ -1,8 +1,10 @@
 import json
+from html import unescape
 
 import pandas as pd
 
 from conductor_eval.analysis import (
+    _build_combined_html,
     build_chord_performance_by_model,
     build_cost_by_model,
     build_cost_vs_pass,
@@ -21,6 +23,22 @@ from conductor_eval.analysis import (
     compute_text_positions,
     load_run,
 )
+
+
+def test_combined_html_escapes_run_metadata_and_preserves_unicode():
+    run_name = "Résumé <script>alert(\"run\" & 'name')</script>"
+    timestamp = '2026-07-19 </p><script>alert("timestamp")</script>'
+    df = pd.DataFrame([{"model": "model", "overall_pass": True, "cost": 0.0}])
+
+    combined_html = _build_combined_html({}, run_name, timestamp, {}, df)
+
+    assert '<script>alert("run"' not in combined_html
+    assert '</p><script>alert("timestamp")</script>' not in combined_html
+    assert "&lt;script&gt;" in combined_html
+    assert "&lt;/p&gt;&lt;script&gt;" in combined_html
+    assert "&quot;run&quot; &amp; &#x27;name&#x27;" in combined_html
+    assert run_name in unescape(combined_html)
+    assert timestamp in unescape(combined_html)
 
 
 def _write_run(tmp_path, tests):
