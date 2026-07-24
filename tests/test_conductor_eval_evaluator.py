@@ -224,3 +224,72 @@ def test_test_params_reject_unselected_test(tmp_path):
             tests=["scale"],
             test_params={"polyphony": {"min_voices": 3}},
         )
+
+
+def test_summary_preserves_unknown_costs_and_excludes_failed_latency(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    summary = evaluator._generate_summary(
+        [
+            {
+                "model": "reported",
+                "provider": "OpenAI",
+                "root": "C",
+                "scale": "major",
+                "metrics": {"cost": 0.25, "api_latency": 2.0, "attempt_latency": 2.0},
+                "tests": {"overall_pass": True},
+                "error": None,
+            },
+            {
+                "model": "unknown",
+                "provider": "Ollama",
+                "root": "C",
+                "scale": "major",
+                "metrics": {"cost": None, "api_latency": None, "attempt_latency": 7.0},
+                "tests": {"overall_pass": False},
+                "error": "timed out",
+            },
+        ],
+        {"timestamp": "20260723_000000", "run_name": "metric-contract"},
+    )
+
+    assert summary["totals"]["total_cost"] == 0.25
+    assert summary["totals"]["known_cost_generations"] == 1
+    assert summary["totals"]["unknown_cost_generations"] == 1
+    assert summary["totals"]["total_time"] == 9.0
+    assert summary["totals"]["avg_successful_latency"] == 2.0
+    assert summary["by_model"]["unknown"]["avg_latency"] is None
+
+
+def test_failed_generation_records_attempt_latency(monkeypatch, tmp_path):
+    class FailingAdapter:
+        def __init__(self, output_dir):
+            self.output_dir = output_dir
+
+        def generate(self, **kwargs):
+            raise RuntimeError("provider timed out")
+
+    monkeypatch.setattr("conductor_eval.evaluator.EvalEngineAdapter", FailingAdapter)
+    monkeypatch.setattr("conductor_eval.evaluator.time.perf_counter", lambda: next(clock))
+    clock = iter([100.0, 103.5])
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    task = {
+        "provider": "OpenAI",
+        "model": "test-model",
+        "full_prompt": "prompt",
+        "original_prompt": "prompt",
+        "root": "C",
+        "scale": "major",
+        "use_thinking": False,
+        "effort": None,
+        "variation_name": "standard",
+    }
+
+    result = evaluator._run_single(task, tmp_path / "run", ["scale"])
+
+    assert result["error"] == "provider timed out"
+    assert result["metrics"] == {
+        "api_latency": None,
+        "attempt_latency": 3.5,
+        "cost": None,
+        "cost_available": False,
+    }

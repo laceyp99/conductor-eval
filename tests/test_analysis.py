@@ -25,6 +25,19 @@ from conductor_eval.analysis import (
 )
 
 
+def test_metric_charts_exclude_unknown_costs_and_failed_latencies():
+    df = pd.DataFrame(
+        [
+            {"model": "reported", "cost": 0.5, "api_latency": 2.0, "overall_pass": True},
+            {"model": "unknown", "cost": None, "api_latency": None, "overall_pass": False},
+        ]
+    )
+
+    assert list(build_cost_by_model(df).data[0].y) == ["reported"]
+    assert [trace.name for trace in build_latency_box(df).data] == ["reported"]
+    assert list(build_latency_vs_pass(df).data[0].customdata) == ["reported"]
+
+
 def test_combined_html_escapes_run_metadata_and_preserves_unicode():
     run_name = "Résumé <script>alert(\"run\" & 'name')</script>"
     timestamp = '2026-07-19 </p><script>alert("timestamp")</script>'
