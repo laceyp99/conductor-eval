@@ -297,8 +297,12 @@ Aggregated statistics for the entire run:
         "total_generations": 48,
         "successful_generations": 45,
         "failed_generations": 3,
+        "generation_error_generations": 3,
+        "validation_failed_generations": 6,
+        "ineligible_generations": 3,
+        "eligible_generations": 42,
         "overall_pass_count": 36,
-        "overall_pass_rate": 0.75,
+        "overall_pass_rate": 0.857,
         "total_cost": 1.25,
         "total_time": 120.5
     },
@@ -345,6 +349,8 @@ Individual results for each generation:
             "total": 16,
             "correct": 16,
             "incorrect": 0,
+            "eligible": true,
+            "status": "passed",
             "pitches": { "correct": [0, 2, 4, 5, 7, 9, 11], "incorrect": [] }
         },
         "duration": {
@@ -356,10 +362,15 @@ Individual results for each generation:
             "incorrect": 0,
             "lengths": {}
         },
-        "overall_pass": true
+        "overall_pass": true,
+        "overall_status": "passed"
     }
 }
 ```
+
+Overall pass rates use only eligible results as their denominator. Each result persists
+an `overall_status` of `passed`, `failed`, `ineligible`, or `generation_error`; a check
+with no examined notes is ineligible and can never make `overall_pass` true.
 
 
 ## Analysis

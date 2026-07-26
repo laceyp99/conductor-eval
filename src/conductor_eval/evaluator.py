@@ -139,6 +139,13 @@ class Evaluator:
         "chord_event_positions": chord_event_positions_test,
     }
 
+    @staticmethod
+    def _with_required_scale_test(tests: list[str]) -> list[str]:
+        """Return selected tests with the always-on scale check included once."""
+        if "scale" in tests:
+            return list(tests)
+        return ["scale", *tests]
+
     def __init__(
         self,
         output_dir: str | Path | None = None,
@@ -208,6 +215,7 @@ class Evaluator:
         if run_name is None:
             raise ValueError("run_name is required")
 
+        tests = self._with_required_scale_test(tests)
         test_params = self._validate_test_params(tests, test_params)
 
         # Normalize prompts to list
@@ -304,8 +312,11 @@ class Evaluator:
                     "overall_pass": bool
                 }
         """
+        tests = self._with_required_scale_test(tests)
         results = {}
         all_passed = True
+        substantive_checks = 0
+        test_failed = False
         test_params = self._validate_test_params(tests, test_params)
 
         for test_name in tests:
@@ -320,13 +331,32 @@ class Evaluator:
                 try:
                     test_result = test_func(midi_data, root, scale)
                     test_result["ran"] = True
+                    test_result["eligible"] = test_result.get("total", 0) > 0
+                    test_result["passed"] = (
+                        test_result["eligible"] and test_result.get("incorrect", 0) == 0
+                    )
+                    test_result["status"] = (
+                        "passed"
+                        if test_result["passed"]
+                        else "failed"
+                        if test_result["eligible"]
+                        else "ineligible"
+                    )
                     test_result["params"] = {"root": root, "scale": scale}
                     results[test_name] = test_result
-                    if test_result.get("incorrect", 0) > 0:
+                    if test_result["eligible"]:
+                        substantive_checks += 1
+                    if not test_result["passed"] and test_result["eligible"]:
                         all_passed = False
                 except Exception as e:
-                    results[test_name] = {"ran": False, "error": str(e)}
+                    results[test_name] = {
+                        "ran": False,
+                        "eligible": False,
+                        "status": "failed",
+                        "error": str(e),
+                    }
                     all_passed = False
+                    test_failed = True
 
             elif test_name == "duration":
                 explicit_params = test_params.get(test_name, {})
@@ -335,6 +365,8 @@ class Evaluator:
                 if "duration" not in resolved_params:
                     results[test_name] = {
                         "ran": False,
+                        "eligible": False,
+                        "status": "ineligible",
                         "skipped": "No duration keyword detected in prompt",
                     }
                 else:
@@ -342,14 +374,33 @@ class Evaluator:
                         duration_value = resolved_params["duration"]
                         test_result = test_func(midi_data, duration_value)
                         test_result["ran"] = True
+                        test_result["eligible"] = test_result.get("total", 0) > 0
+                        test_result["passed"] = (
+                            test_result["eligible"] and test_result.get("incorrect", 0) == 0
+                        )
+                        test_result["status"] = (
+                            "passed"
+                            if test_result["passed"]
+                            else "failed"
+                            if test_result["eligible"]
+                            else "ineligible"
+                        )
                         test_result["params"] = {"duration": duration_value}
                         test_result["detected_from_prompt"] = "duration" not in explicit_params
                         results[test_name] = test_result
-                        if test_result.get("incorrect", 0) > 0:
+                        if test_result["eligible"]:
+                            substantive_checks += 1
+                        if not test_result["passed"] and test_result["eligible"]:
                             all_passed = False
                     except Exception as e:
-                        results[test_name] = {"ran": False, "error": str(e)}
+                        results[test_name] = {
+                            "ran": False,
+                            "eligible": False,
+                            "status": "failed",
+                            "error": str(e),
+                        }
                         all_passed = False
+                        test_failed = True
 
             else:
                 detected_params = self._detect_test_params(prompt, test_name)
@@ -359,15 +410,35 @@ class Evaluator:
                 try:
                     test_result = test_func(midi_data, **resolved_params)
                     test_result["ran"] = True
+                    test_result["eligible"] = True
+                    test_result["status"] = (
+                        "passed"
+                        if test_result.get("passed", test_result.get("incorrect", 0) == 0)
+                        else "failed"
+                    )
                     test_result["params"] = resolved_params
                     results[test_name] = test_result
+                    substantive_checks += 1
                     if not test_result.get("passed", test_result.get("incorrect", 0) == 0):
                         all_passed = False
                 except Exception as e:
-                    results[test_name] = {"ran": False, "error": str(e)}
+                    results[test_name] = {
+                        "ran": False,
+                        "eligible": False,
+                        "status": "failed",
+                        "error": str(e),
+                    }
                     all_passed = False
+                    test_failed = True
 
-        results["overall_pass"] = all_passed
+        results["overall_pass"] = all_passed and substantive_checks > 0
+        results["overall_status"] = (
+            "passed"
+            if results["overall_pass"]
+            else "failed"
+            if test_failed or (substantive_checks > 0 and not all_passed)
+            else "ineligible"
+        )
         return results
 
     @staticmethod
@@ -937,6 +1008,7 @@ class Evaluator:
             logger.error(f"Generation failed for {model}: {e}")
             result["error"] = str(e)
             result["tests"]["overall_pass"] = False
+            result["tests"]["overall_status"] = "generation_error"
             # Still save the result even on failure
             self._save_results(result, None, [], run_path, task)
             return result
@@ -1032,6 +1104,10 @@ class Evaluator:
                 "total_generations": len(all_results),
                 "successful_generations": 0,
                 "failed_generations": 0,
+                "generation_error_generations": 0,
+                "validation_failed_generations": 0,
+                "ineligible_generations": 0,
+                "eligible_generations": 0,
                 "overall_pass_count": 0,
                 "overall_pass_rate": 0.0,
                 "total_cost": 0.0,
@@ -1048,13 +1124,29 @@ class Evaluator:
         }
 
         for r in all_results:
+            tests = r.get("tests", {})
+            if r.get("error"):
+                outcome = "generation_error"
+            else:
+                outcome = tests.get(
+                    "overall_status", "passed" if tests.get("overall_pass", False) else "failed"
+                )
+
             # Totals
             if r.get("error"):
                 summary["totals"]["failed_generations"] += 1
+                summary["totals"]["generation_error_generations"] += 1
             else:
                 summary["totals"]["successful_generations"] += 1
 
-            if r.get("tests", {}).get("overall_pass", False):
+            if outcome in {"passed", "failed"}:
+                summary["totals"]["eligible_generations"] += 1
+            if outcome == "failed":
+                summary["totals"]["validation_failed_generations"] += 1
+            elif outcome == "ineligible":
+                summary["totals"]["ineligible_generations"] += 1
+
+            if outcome == "passed":
                 summary["totals"]["overall_pass_count"] += 1
 
             metrics = r.get("metrics", {})
@@ -1081,6 +1173,10 @@ class Evaluator:
                     "tested": 0,
                     "passed": 0,
                     "failed": 0,
+                    "generation_errors": 0,
+                    "validation_failed": 0,
+                    "ineligible": 0,
+                    "eligible": 0,
                     "pass_rate": 0.0,
                     "total_cost": 0.0,
                     "known_cost_generations": 0,
@@ -1091,10 +1187,17 @@ class Evaluator:
                 }
             m = summary["by_model"][model]
             m["tested"] += 1
-            if r.get("tests", {}).get("overall_pass", False):
+            if outcome == "passed":
                 m["passed"] += 1
             if r.get("error"):
                 m["failed"] += 1
+                m["generation_errors"] += 1
+            elif outcome == "failed":
+                m["validation_failed"] += 1
+            elif outcome == "ineligible":
+                m["ineligible"] += 1
+            if outcome in {"passed", "failed"}:
+                m["eligible"] += 1
             if cost is None:
                 m["unknown_cost_generations"] += 1
             else:
@@ -1107,27 +1210,59 @@ class Evaluator:
             # By root
             root = r["root"]
             if root not in summary["by_root"]:
-                summary["by_root"][root] = {"tested": 0, "passed": 0}
+                summary["by_root"][root] = {
+                    "tested": 0,
+                    "passed": 0,
+                    "validation_failed": 0,
+                    "generation_errors": 0,
+                    "ineligible": 0,
+                    "eligible": 0,
+                }
             summary["by_root"][root]["tested"] += 1
-            if r.get("tests", {}).get("overall_pass", False):
+            if outcome == "passed":
                 summary["by_root"][root]["passed"] += 1
+            elif outcome == "failed":
+                summary["by_root"][root]["validation_failed"] += 1
+            elif outcome == "generation_error":
+                summary["by_root"][root]["generation_errors"] += 1
+            else:
+                summary["by_root"][root]["ineligible"] += 1
+            if outcome in {"passed", "failed"}:
+                summary["by_root"][root]["eligible"] += 1
 
             # By scale
             scale = r["scale"]
             if scale not in summary["by_scale"]:
-                summary["by_scale"][scale] = {"tested": 0, "passed": 0}
+                summary["by_scale"][scale] = {
+                    "tested": 0,
+                    "passed": 0,
+                    "validation_failed": 0,
+                    "generation_errors": 0,
+                    "ineligible": 0,
+                    "eligible": 0,
+                }
             summary["by_scale"][scale]["tested"] += 1
-            if r.get("tests", {}).get("overall_pass", False):
+            if outcome == "passed":
                 summary["by_scale"][scale]["passed"] += 1
+            elif outcome == "failed":
+                summary["by_scale"][scale]["validation_failed"] += 1
+            elif outcome == "generation_error":
+                summary["by_scale"][scale]["generation_errors"] += 1
+            else:
+                summary["by_scale"][scale]["ineligible"] += 1
+            if outcome in {"passed", "failed"}:
+                summary["by_scale"][scale]["eligible"] += 1
 
         # Calculate rates
-        total = summary["totals"]["total_generations"]
-        if total > 0:
-            summary["totals"]["overall_pass_rate"] = summary["totals"]["overall_pass_count"] / total
+        eligible_total = summary["totals"]["eligible_generations"]
+        if eligible_total > 0:
+            summary["totals"]["overall_pass_rate"] = (
+                summary["totals"]["overall_pass_count"] / eligible_total
+            )
 
         for model, m in summary["by_model"].items():
-            if m["tested"] > 0:
-                m["pass_rate"] = m["passed"] / m["tested"]
+            if m["eligible"] > 0:
+                m["pass_rate"] = m["passed"] / m["eligible"]
                 if m["successful_latency_count"]:
                     m["avg_latency"] = m["total_latency"] / m["successful_latency_count"]
 
@@ -1138,12 +1273,12 @@ class Evaluator:
             )
 
         for root, r in summary["by_root"].items():
-            if r["tested"] > 0:
-                r["pass_rate"] = r["passed"] / r["tested"]
+            if r["eligible"] > 0:
+                r["pass_rate"] = r["passed"] / r["eligible"]
 
         for scale, s in summary["by_scale"].items():
-            if s["tested"] > 0:
-                s["pass_rate"] = s["passed"] / s["tested"]
+            if s["eligible"] > 0:
+                s["pass_rate"] = s["passed"] / s["eligible"]
 
         return summary
 

@@ -195,6 +195,63 @@ def test_run_tests_keeps_duration_prompt_detection_as_fallback(tmp_path):
     assert results["duration"]["detected_from_prompt"] is True
 
 
+def test_run_tests_marks_empty_midi_ineligible_under_default_checks(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    results = evaluator.run_tests(
+        midi_data=MidiFile(ticks_per_beat=480),
+        root="C",
+        scale="major",
+        prompt="use quarter notes",
+        tests=["scale", "duration"],
+    )
+
+    assert results["scale"]["total"] == 0
+    assert results["scale"]["status"] == "ineligible"
+    assert results["duration"]["total"] == 0
+    assert results["duration"]["status"] == "ineligible"
+    assert results["overall_pass"] is False
+    assert results["overall_status"] == "ineligible"
+
+
+def test_run_tests_marks_skipped_only_selection_ineligible(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    results = evaluator.run_tests(
+        midi_data=MidiFile(ticks_per_beat=480),
+        root="C",
+        scale="major",
+        prompt="melody",
+        tests=["duration"],
+    )
+
+    assert results["scale"]["status"] == "ineligible"
+    assert results["duration"]["status"] == "ineligible"
+    assert results["overall_pass"] is False
+    assert results["overall_status"] == "ineligible"
+
+
+def test_run_tests_always_includes_scale_when_callers_omit_it(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    midi = MidiFile(ticks_per_beat=480)
+    track = midi.add_track()
+    track.append(Message("note_on", note=60, velocity=80, time=0))
+    track.append(Message("note_off", note=60, velocity=0, time=480))
+
+    results = evaluator.run_tests(
+        midi_data=midi,
+        root="C",
+        scale="major",
+        prompt="melody",
+        tests=["duration"],
+    )
+
+    assert results["scale"]["passed"] is True
+    assert results["duration"]["status"] == "ineligible"
+    assert results["overall_pass"] is True
+    assert results["overall_status"] == "passed"
+
+
 def test_generate_tasks_copies_test_params_to_each_task(tmp_path):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
     test_params = {"polyphony": {"min_voices": 3}}
@@ -258,6 +315,58 @@ def test_summary_preserves_unknown_costs_and_excludes_failed_latency(tmp_path):
     assert summary["totals"]["total_time"] == 9.0
     assert summary["totals"]["avg_successful_latency"] == 2.0
     assert summary["by_model"]["unknown"]["avg_latency"] is None
+
+
+def test_summary_separates_eligible_ineligible_and_generation_errors(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    summary = evaluator._generate_summary(
+        [
+            {
+                "model": "model",
+                "provider": "OpenAI",
+                "root": "C",
+                "scale": "major",
+                "metrics": {},
+                "tests": {"overall_pass": True, "overall_status": "passed"},
+                "error": None,
+            },
+            {
+                "model": "model",
+                "provider": "OpenAI",
+                "root": "C",
+                "scale": "major",
+                "metrics": {},
+                "tests": {"overall_pass": False, "overall_status": "failed"},
+                "error": None,
+            },
+            {
+                "model": "model",
+                "provider": "OpenAI",
+                "root": "C",
+                "scale": "major",
+                "metrics": {},
+                "tests": {"overall_pass": False, "overall_status": "ineligible"},
+                "error": None,
+            },
+            {
+                "model": "model",
+                "provider": "OpenAI",
+                "root": "C",
+                "scale": "major",
+                "metrics": {},
+                "tests": {"overall_pass": False, "overall_status": "generation_error"},
+                "error": "timed out",
+            },
+        ],
+        {"timestamp": "20260723_000000", "run_name": "outcomes"},
+    )
+
+    assert summary["totals"]["eligible_generations"] == 2
+    assert summary["totals"]["overall_pass_count"] == 1
+    assert summary["totals"]["validation_failed_generations"] == 1
+    assert summary["totals"]["ineligible_generations"] == 1
+    assert summary["totals"]["generation_error_generations"] == 1
+    assert summary["totals"]["overall_pass_rate"] == 0.5
 
 
 def test_failed_generation_records_attempt_latency(monkeypatch, tmp_path):

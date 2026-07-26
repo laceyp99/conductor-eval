@@ -97,6 +97,18 @@ def _known_cost_rows(df):
     return df.loc[df["cost"].notna()]
 
 
+def _eligible_overall_rows(df):
+    """Return rows with an overall result that is eligible for pass-rate denominators."""
+    return df.loc[df["overall_pass"].notna()]
+
+
+def _overall_statuses(df):
+    """Return persisted outcome statuses, with a sensible legacy-result fallback."""
+    if "overall_status" in df:
+        return df["overall_status"]
+    return df["overall_pass"].map(lambda passed: "passed" if passed else "failed")
+
+
 # Plotly textposition options mapped to angles (degrees, counter-clockwise from +x axis).
 # The label is placed in the direction of the angle relative to the marker.
 _TEXT_POSITIONS = [
@@ -457,6 +469,13 @@ def load_run(run_path):
         chord_progression_test = tests.get("chord_progression", {})
         harmonic_rhythm_test = tests.get("harmonic_rhythm", {})
         chord_event_positions_test = tests.get("chord_event_positions", {})
+        overall_status = (
+            "generation_error"
+            if result.get("error")
+            else tests.get(
+                "overall_status", "passed" if tests.get("overall_pass", False) else "failed"
+            )
+        )
 
         row = {
             "model": result.get("model", "unknown"),
@@ -476,7 +495,11 @@ def load_run(run_path):
             "cost": metrics.get("cost"),
             "cost_available": metrics.get("cost_available", metrics.get("cost") is not None),
             # Overall
-            "overall_pass": tests.get("overall_pass", False),
+            "overall_pass": (
+                tests.get("overall_pass", False) if overall_status in {"passed", "failed"} else None
+            ),
+            "overall_status": overall_status,
+            "overall_eligible": overall_status in {"passed", "failed"},
             "error": result.get("error"),
             # Scale test
             "scale_ran": scale_test.get("ran", False),
@@ -542,9 +565,15 @@ def load_run(run_path):
             ),
             axis=1,
         )
-        df["scale_pass"] = df.apply(lambda r: r["scale_incorrect"] == 0 and r["scale_ran"], axis=1)
+        df["scale_pass"] = df.apply(
+            lambda r: r["scale_incorrect"] == 0 and r["scale_ran"] and r["scale_total"] > 0,
+            axis=1,
+        )
         df["duration_pass"] = df.apply(
-            lambda r: r["duration_incorrect"] == 0 and r["duration_ran"], axis=1
+            lambda r: (
+                r["duration_incorrect"] == 0 and r["duration_ran"] and r["duration_total"] > 0
+            ),
+            axis=1,
         )
         for test_name in (
             "monophony",
@@ -726,6 +755,7 @@ def build_pass_rate_by_model(df):
     Returns:
         go.Figure: Bar chart figure.
     """
+    df = _eligible_overall_rows(df)
     if df.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
@@ -750,7 +780,7 @@ def build_pass_rate_by_model(df):
             textposition="auto",
             customdata=counts,
             hovertemplate=_rate_hover_template(
-                "Model: %{y}", rate_value="%{x:.1f}", denominator_label="Generations"
+                "Model: %{y}", rate_value="%{x:.1f}", denominator_label="Eligible generations"
             ),
             marker_color=[MODEL_COLORS[i % len(MODEL_COLORS)] for i in range(len(stats))],
         )
@@ -820,7 +850,12 @@ def _finish_check_pass_rate_figure(fig, title):
 def build_duration_adherence_by_model(df):
     """Build duration pass rates by model for quarter- and eighth-note cases."""
     title = "Duration Adherence by Model and Note Length"
-    eligible = df[df["duration_ran"] & df["duration_param"].isin(["quarter", "eighth"])]
+    has_duration_evidence = df["duration_total"] > 0 if "duration_total" in df else True
+    eligible = df[
+        df["duration_ran"]
+        & has_duration_evidence
+        & df["duration_param"].isin(["quarter", "eighth"])
+    ]
     if eligible.empty:
         return _empty_performance_figure(title, "No quarter- or eighth-note duration data")
 
@@ -878,6 +913,7 @@ def build_model_root_heatmap(df):
     Returns:
         go.Figure: Heatmap figure.
     """
+    df = _eligible_overall_rows(df)
     if df.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
@@ -912,7 +948,9 @@ def build_model_root_heatmap(df):
             texttemplate="%{text:.1f}%",
             customdata=counts,
             hovertemplate=_rate_hover_template(
-                "Model: %{y}<br>Root: %{x}", denominator_label="Generations", rate_value="%{z:.1f}"
+                "Model: %{y}<br>Root: %{x}",
+                denominator_label="Eligible generations",
+                rate_value="%{z:.1f}",
             ),
             colorscale="RdYlGn",
             zmin=0,
@@ -938,6 +976,7 @@ def build_major_vs_minor_by_model(df):
     Returns:
         go.Figure: Grouped bar chart figure.
     """
+    df = _eligible_overall_rows(df)
     if df.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
@@ -972,7 +1011,9 @@ def build_major_vs_minor_by_model(df):
             text=major_labels,
             textposition="auto",
             customdata=major_counts,
-            hovertemplate=_rate_hover_template("Model: %{x}<br>Scale: Major"),
+            hovertemplate=_rate_hover_template(
+                "Model: %{x}<br>Scale: Major", denominator_label="Eligible generations"
+            ),
             marker_color="#5dade2",
         )
     )
@@ -984,7 +1025,9 @@ def build_major_vs_minor_by_model(df):
             text=minor_labels,
             textposition="auto",
             customdata=minor_counts,
-            hovertemplate=_rate_hover_template("Model: %{x}<br>Scale: Minor"),
+            hovertemplate=_rate_hover_template(
+                "Model: %{x}<br>Scale: Minor", denominator_label="Eligible generations"
+            ),
             marker_color="#e74c3c",
         )
     )
@@ -1007,6 +1050,7 @@ def build_root_pass_rate(df):
     Returns:
         go.Figure: Bar chart figure.
     """
+    df = _eligible_overall_rows(df)
     if df.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
@@ -1029,7 +1073,9 @@ def build_root_pass_rate(df):
             text=labels,
             textposition="auto",
             customdata=counts,
-            hovertemplate=_rate_hover_template("Root: %{x}", denominator_label="Generations"),
+            hovertemplate=_rate_hover_template(
+                "Root: %{x}", denominator_label="Eligible generations"
+            ),
             marker_color="#5dade2",
         )
     )
@@ -1051,6 +1097,7 @@ def build_root_scale_grouped(df):
     Returns:
         go.Figure: Grouped bar chart figure.
     """
+    df = _eligible_overall_rows(df)
     if df.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
@@ -1085,7 +1132,9 @@ def build_root_scale_grouped(df):
             text=major_labels,
             textposition="auto",
             customdata=major_counts,
-            hovertemplate=_rate_hover_template("Root: %{x}<br>Scale: Major"),
+            hovertemplate=_rate_hover_template(
+                "Root: %{x}<br>Scale: Major", denominator_label="Eligible generations"
+            ),
             marker_color="#5dade2",
         )
     )
@@ -1097,7 +1146,9 @@ def build_root_scale_grouped(df):
             text=minor_labels,
             textposition="auto",
             customdata=minor_counts,
-            hovertemplate=_rate_hover_template("Root: %{x}<br>Scale: Minor"),
+            hovertemplate=_rate_hover_template(
+                "Root: %{x}<br>Scale: Minor", denominator_label="Eligible generations"
+            ),
             marker_color="#e74c3c",
         )
     )
@@ -1120,6 +1171,7 @@ def build_root_scale_heatmap(df):
     Returns:
         go.Figure: Heatmap figure.
     """
+    df = _eligible_overall_rows(df)
     if df.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
@@ -1163,7 +1215,7 @@ def build_root_scale_heatmap(df):
             customdata=counts,
             hovertemplate=_rate_hover_template(
                 "Model: %{y}<br>Root + scale: %{x}",
-                denominator_label="Generations",
+                denominator_label="Eligible generations",
                 rate_value="%{z:.1f}",
             ),
             colorscale="RdYlGn",
@@ -1225,6 +1277,7 @@ def build_latency_vs_pass(df):
     Returns:
         go.Figure: Scatter plot figure.
     """
+    df = _eligible_overall_rows(df)
     successful_rows = _successful_latency_rows(df)
     if successful_rows.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
@@ -1346,7 +1399,7 @@ def build_cost_vs_pass(df):
     Returns:
         go.Figure: Scatter plot figure.
     """
-    df = _known_cost_rows(df)
+    df = _known_cost_rows(_eligible_overall_rows(df))
     if df.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No reported costs"))
 
@@ -1640,6 +1693,7 @@ def build_effort_impact_delta(df):
     Returns:
         go.Figure: Delta bar chart figure.
     """
+    df = _eligible_overall_rows(df)
     if df.empty or "base_model" not in df.columns:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
@@ -1765,6 +1819,7 @@ def build_reasoning_toggle_comparison(df):
     Returns:
         go.Figure: Grouped bar chart figure.
     """
+    df = _eligible_overall_rows(df)
     if df.empty or "base_model" not in df.columns:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
@@ -1839,7 +1894,7 @@ def build_reasoning_toggle_comparison(df):
             hovertemplate=_rate_hover_template(
                 "Model: %{y}<br>Mode: Standard",
                 rate_value="%{x:.1f}",
-                denominator_label="Generations",
+                denominator_label="Eligible generations",
             ),
             marker_color="#5dade2",
             showlegend=True,
@@ -1859,7 +1914,7 @@ def build_reasoning_toggle_comparison(df):
             hovertemplate=_rate_hover_template(
                 "Model: %{y}<br>Mode: Reasoning",
                 rate_value="%{x:.1f}",
-                denominator_label="Generations",
+                denominator_label="Eligible generations",
             ),
             marker_color="#f39c12",
             showlegend=True,
@@ -1962,7 +2017,7 @@ def build_reasoning_cost_effectiveness(df):
     Returns:
         go.Figure: Scatter plot figure.
     """
-    df = _known_cost_rows(df)
+    df = _known_cost_rows(_eligible_overall_rows(df))
     if df.empty or "base_model" not in df.columns:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
@@ -2393,15 +2448,19 @@ def create_app(run_path):
             return html.P("No data matches current filters.", style={"color": PLOTLY_TEXT})
 
         total = len(filtered)
-        passed = int(filtered["overall_pass"].sum())
-        failed_gen = int(filtered["has_error"].sum())
-        pass_rate = round(passed / total * 100, 1) if total > 0 else 0
+        eligible = _eligible_overall_rows(filtered)
+        passed = int(eligible["overall_pass"].sum())
+        statuses = _overall_statuses(filtered)
+        validation_failed = int((statuses == "failed").sum())
+        ineligible = int((statuses == "ineligible").sum())
+        failed_gen = int((statuses == "generation_error").sum())
+        pass_rate = round(passed / len(eligible) * 100, 1) if len(eligible) > 0 else 0
         total_cost = filtered["cost"].sum()
         known_costs = int(filtered["cost"].notna().sum())
         avg_latency = filtered["api_latency"].mean()
 
         # Best / worst model
-        model_rates = filtered.groupby("model")["overall_pass"].mean().sort_values(ascending=False)
+        model_rates = eligible.groupby("model")["overall_pass"].mean().sort_values(ascending=False)
         best_model = (
             f"{model_rates.index[0]} ({model_rates.iloc[0] * 100:.1f}%)"
             if len(model_rates) > 0
@@ -2423,7 +2482,7 @@ def create_app(run_path):
                             make_metric_card(
                                 "Pass Rate",
                                 f"{pass_rate}%",
-                                f"{passed} passed / {total - passed - failed_gen} failed / {failed_gen} errors",
+                                f"{passed} passed / {validation_failed} failed / {ineligible} ineligible / {failed_gen} errors",
                                 color="#2ecc71" if pass_rate >= 50 else "#e74c3c",
                             ),
                             md=2,
@@ -2831,8 +2890,13 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
         str: Complete HTML string.
     """
     total = len(df)
-    passed = int(df["overall_pass"].sum())
-    pass_rate = round(passed / total * 100, 1) if total > 0 else 0
+    eligible = _eligible_overall_rows(df)
+    passed = int(eligible["overall_pass"].sum())
+    statuses = _overall_statuses(df)
+    validation_failed = int((statuses == "failed").sum())
+    ineligible = int((statuses == "ineligible").sum())
+    generation_errors = int((statuses == "generation_error").sum())
+    pass_rate = round(passed / len(eligible) * 100, 1) if len(eligible) > 0 else 0
     total_reported_cost = df["cost"].sum()
     known_costs = int(df["cost"].notna().sum())
     escaped_run_name = escape(str(run_name))
@@ -2866,8 +2930,8 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
     <p style="color: #666">Run: {escaped_timestamp} | {total} generations | {len(df["model"].unique())} models</p>
     <div class="stats">
         <div class="stat-card"><div class="label">Total</div><div class="value">{total}</div></div>
-        <div class="stat-card"><div class="label">Pass Rate</div><div class="value" style="color: {"#2ecc71" if pass_rate >= 50 else "#e74c3c"}">{pass_rate}%</div></div>
-        <div class="stat-card"><div class="label">Passed</div><div class="value">{passed}</div></div>
+        <div class="stat-card"><div class="label">Pass Rate</div><div class="value" style="color: {"#2ecc71" if pass_rate >= 50 else "#e74c3c"}">{pass_rate}%</div><div class="label">{passed}/{len(eligible)} eligible</div></div>
+        <div class="stat-card"><div class="label">Outcomes</div><div class="value">{passed} / {validation_failed}</div><div class="label">passed / failed</div><div class="label">{ineligible} ineligible / {generation_errors} errors</div></div>
         <div class="stat-card"><div class="label">Total Reported Cost</div><div class="value">${total_reported_cost:.4f}</div><div class="label">{known_costs}/{total} costs reported</div></div>
     </div>
     {"".join(chart_divs)}

@@ -201,6 +201,26 @@ def test_load_run_treats_missing_and_not_run_checks_as_ineligible(tmp_path):
     assert row["duration_pass"]
 
 
+def test_load_run_excludes_ineligible_results_from_overall_pass_rates(tmp_path):
+    run_path = _write_run(
+        tmp_path,
+        {
+            "overall_status": "ineligible",
+            "scale": {"ran": True, "total": 0, "correct": 0, "incorrect": 0},
+            "duration": {"ran": False, "skipped": "No duration keyword detected in prompt"},
+        },
+    )
+
+    df, _, _ = load_run(run_path)
+    row = df.iloc[0]
+
+    assert row["overall_status"] == "ineligible"
+    assert row["overall_pass"] is None
+    assert not row["scale_pass"]
+    assert not row["duration_pass"]
+    assert not build_pass_rate_by_model(df).data
+
+
 def test_duration_adherence_groups_by_note_length_and_excludes_not_run_rows():
     df = pd.DataFrame(
         [
@@ -308,7 +328,7 @@ def test_rate_charts_share_passed_and_generation_count_context():
     assert list(overall.data[0].customdata[alpha_index]) == [1, 2]
     assert "Passed: %{customdata[0]}" in overall.data[0].hovertemplate
     assert list(major_minor.data[0].customdata[0]) == [1, 1]
-    assert "Executed: %{customdata[1]}" in major_minor.data[0].hovertemplate
+    assert "Eligible generations: %{customdata[1]}" in major_minor.data[0].hovertemplate
     assert list(heatmap.data[0].customdata[0][0]) == [1, 1]
 
 
