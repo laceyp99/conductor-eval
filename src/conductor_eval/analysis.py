@@ -1225,19 +1225,22 @@ def build_latency_vs_pass(df):
     Returns:
         go.Figure: Scatter plot figure.
     """
-    df = _successful_latency_rows(df)
-    if df.empty:
+    successful_rows = _successful_latency_rows(df)
+    if successful_rows.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
-    stats = (
+    latency_stats = (
+        successful_rows.groupby("model").agg(avg_latency=("api_latency", "mean")).reset_index()
+    )
+    attempt_stats = (
         df.groupby("model")
         .agg(
-            avg_latency=("api_latency", "mean"),
             pass_rate=("overall_pass", "mean"),
             count=("overall_pass", "count"),
         )
         .reset_index()
     )
+    stats = latency_stats.merge(attempt_stats, on="model", how="inner")
     stats["pass_rate"] = (stats["pass_rate"] * 100).round(1)
     stats = _sort_by_model(stats)
     x_bounds = _padded_axis_bounds(stats["avg_latency"])

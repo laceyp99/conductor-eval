@@ -38,6 +38,24 @@ def test_metric_charts_exclude_unknown_costs_and_failed_latencies():
     assert list(build_latency_vs_pass(df).data[0].customdata) == ["reported"]
 
 
+def test_latency_vs_pass_uses_all_attempts_for_pass_rate():
+    df = pd.DataFrame(
+        [
+            {"model": "alpha", "api_latency": 2.0, "overall_pass": True},
+            {"model": "alpha", "api_latency": None, "overall_pass": False},
+            {"model": "beta", "api_latency": 4.0, "overall_pass": False},
+        ]
+    )
+
+    trace = build_latency_vs_pass(df).data[0]
+    stats = {
+        model: (latency, pass_rate)
+        for model, latency, pass_rate in zip(trace.customdata, trace.x, trace.y, strict=True)
+    }
+
+    assert stats == {"alpha": (2.0, 50.0), "beta": (4.0, 0.0)}
+
+
 def test_combined_html_escapes_run_metadata_and_preserves_unicode():
     run_name = "Résumé <script>alert(\"run\" & 'name')</script>"
     timestamp = '2026-07-19 </p><script>alert("timestamp")</script>'
