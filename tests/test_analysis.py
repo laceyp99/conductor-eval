@@ -25,6 +25,37 @@ from conductor_eval.analysis import (
 )
 
 
+def test_metric_charts_exclude_unknown_costs_and_failed_latencies():
+    df = pd.DataFrame(
+        [
+            {"model": "reported", "cost": 0.5, "api_latency": 2.0, "overall_pass": True},
+            {"model": "unknown", "cost": None, "api_latency": None, "overall_pass": False},
+        ]
+    )
+
+    assert list(build_cost_by_model(df).data[0].y) == ["reported"]
+    assert [trace.name for trace in build_latency_box(df).data] == ["reported"]
+    assert list(build_latency_vs_pass(df).data[0].customdata) == ["reported"]
+
+
+def test_latency_vs_pass_uses_all_attempts_for_pass_rate():
+    df = pd.DataFrame(
+        [
+            {"model": "alpha", "api_latency": 2.0, "overall_pass": True},
+            {"model": "alpha", "api_latency": None, "overall_pass": False},
+            {"model": "beta", "api_latency": 4.0, "overall_pass": False},
+        ]
+    )
+
+    trace = build_latency_vs_pass(df).data[0]
+    stats = {
+        model: (latency, pass_rate)
+        for model, latency, pass_rate in zip(trace.customdata, trace.x, trace.y, strict=True)
+    }
+
+    assert stats == {"alpha": (2.0, 50.0), "beta": (4.0, 0.0)}
+
+
 def test_combined_html_escapes_run_metadata_and_preserves_unicode():
     run_name = "Résumé <script>alert(\"run\" & 'name')</script>"
     timestamp = '2026-07-19 </p><script>alert("timestamp")</script>'
@@ -39,6 +70,21 @@ def test_combined_html_escapes_run_metadata_and_preserves_unicode():
     assert "&quot;run&quot; &amp; &#x27;name&#x27;" in combined_html
     assert run_name in unescape(combined_html)
     assert timestamp in unescape(combined_html)
+
+
+def test_combined_html_reports_known_cost_count():
+    df = pd.DataFrame(
+        [
+            {"model": "reported", "overall_pass": True, "cost": 0.5},
+            {"model": "unknown", "overall_pass": False, "cost": None},
+        ]
+    )
+
+    combined_html = _build_combined_html({}, "run", "timestamp", {}, df)
+
+    assert "Total Reported Cost" in combined_html
+    assert "$0.5000" in combined_html
+    assert "1/2 costs reported" in combined_html
 
 
 def _write_run(tmp_path, tests):

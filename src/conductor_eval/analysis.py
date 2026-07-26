@@ -87,6 +87,16 @@ def _sort_by_model(frame, column="model"):
     return frame.sort_values(column, key=lambda values: values.map(order)).reset_index(drop=True)
 
 
+def _successful_latency_rows(df):
+    """Return rows with a measured successful-generation latency."""
+    return df.loc[df["api_latency"].notna()]
+
+
+def _known_cost_rows(df):
+    """Return rows whose provider reported a numeric generation cost."""
+    return df.loc[df["cost"].notna()]
+
+
 # Plotly textposition options mapped to angles (degrees, counter-clockwise from +x axis).
 # The label is placed in the direction of the angle relative to the marker.
 _TEXT_POSITIONS = [
@@ -461,8 +471,10 @@ def load_run(run_path):
             "effort": cfg.get("effort"),
             "temperature": cfg.get("temperature", 0.0),
             # Metrics
-            "api_latency": metrics.get("api_latency", 0.0),
-            "cost": metrics.get("cost", 0.0),
+            "api_latency": metrics.get("api_latency"),
+            "attempt_latency": metrics.get("attempt_latency", metrics.get("api_latency")),
+            "cost": metrics.get("cost"),
+            "cost_available": metrics.get("cost_available", metrics.get("cost") is not None),
             # Overall
             "overall_pass": tests.get("overall_pass", False),
             "error": result.get("error"),
@@ -1178,6 +1190,7 @@ def build_latency_box(df):
     Returns:
         go.Figure: Box plot figure.
     """
+    df = _successful_latency_rows(df)
     if df.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
@@ -1212,18 +1225,22 @@ def build_latency_vs_pass(df):
     Returns:
         go.Figure: Scatter plot figure.
     """
-    if df.empty:
+    successful_rows = _successful_latency_rows(df)
+    if successful_rows.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
-    stats = (
+    latency_stats = (
+        successful_rows.groupby("model").agg(avg_latency=("api_latency", "mean")).reset_index()
+    )
+    attempt_stats = (
         df.groupby("model")
         .agg(
-            avg_latency=("api_latency", "mean"),
             pass_rate=("overall_pass", "mean"),
             count=("overall_pass", "count"),
         )
         .reset_index()
     )
+    stats = latency_stats.merge(attempt_stats, on="model", how="inner")
     stats["pass_rate"] = (stats["pass_rate"] * 100).round(1)
     stats = _sort_by_model(stats)
     x_bounds = _padded_axis_bounds(stats["avg_latency"])
@@ -1271,8 +1288,9 @@ def build_cost_by_model(df):
     Returns:
         go.Figure: Bar chart figure.
     """
+    df = _known_cost_rows(df)
     if df.empty:
-        return apply_plotly_theme(go.Figure().update_layout(title="No data"))
+        return apply_plotly_theme(go.Figure().update_layout(title="No reported costs"))
 
     stats = (
         df.groupby("model")
@@ -1328,8 +1346,9 @@ def build_cost_vs_pass(df):
     Returns:
         go.Figure: Scatter plot figure.
     """
+    df = _known_cost_rows(df)
     if df.empty:
-        return apply_plotly_theme(go.Figure().update_layout(title="No data"))
+        return apply_plotly_theme(go.Figure().update_layout(title="No reported costs"))
 
     stats = (
         df.groupby("model")
@@ -1943,6 +1962,7 @@ def build_reasoning_cost_effectiveness(df):
     Returns:
         go.Figure: Scatter plot figure.
     """
+    df = _known_cost_rows(df)
     if df.empty or "base_model" not in df.columns:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
@@ -2377,6 +2397,7 @@ def create_app(run_path):
         failed_gen = int(filtered["has_error"].sum())
         pass_rate = round(passed / total * 100, 1) if total > 0 else 0
         total_cost = filtered["cost"].sum()
+        known_costs = int(filtered["cost"].notna().sum())
         avg_latency = filtered["api_latency"].mean()
 
         # Best / worst model
@@ -2415,8 +2436,21 @@ def create_app(run_path):
                             make_metric_card("Worst Model", worst_model, color="#e74c3c"),
                             md=2,
                         ),
-                        dbc.Col(make_metric_card("Total Cost", f"${total_cost:.4f}"), md=2),
-                        dbc.Col(make_metric_card("Avg Latency", f"{avg_latency:.1f}s"), md=2),
+                        dbc.Col(
+                            make_metric_card(
+                                "Total Reported Cost",
+                                f"${total_cost:.4f}",
+                                f"{known_costs}/{total} costs reported",
+                            ),
+                            md=2,
+                        ),
+                        dbc.Col(
+                            make_metric_card(
+                                "Avg Successful Latency",
+                                f"{avg_latency:.1f}s" if pd.notna(avg_latency) else "N/A",
+                            ),
+                            md=2,
+                        ),
                     ],
                     className="mb-4 g-2",
                 ),
@@ -2799,6 +2833,8 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
     total = len(df)
     passed = int(df["overall_pass"].sum())
     pass_rate = round(passed / total * 100, 1) if total > 0 else 0
+    total_reported_cost = df["cost"].sum()
+    known_costs = int(df["cost"].notna().sum())
     escaped_run_name = escape(str(run_name))
     escaped_timestamp = escape(str(timestamp))
 
@@ -2832,7 +2868,7 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
         <div class="stat-card"><div class="label">Total</div><div class="value">{total}</div></div>
         <div class="stat-card"><div class="label">Pass Rate</div><div class="value" style="color: {"#2ecc71" if pass_rate >= 50 else "#e74c3c"}">{pass_rate}%</div></div>
         <div class="stat-card"><div class="label">Passed</div><div class="value">{passed}</div></div>
-        <div class="stat-card"><div class="label">Total Cost</div><div class="value">${df["cost"].sum():.4f}</div></div>
+        <div class="stat-card"><div class="label">Total Reported Cost</div><div class="value">${total_reported_cost:.4f}</div><div class="label">{known_costs}/{total} costs reported</div></div>
     </div>
     {"".join(chart_divs)}
 </body>

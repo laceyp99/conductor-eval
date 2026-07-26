@@ -757,26 +757,36 @@ class Evaluator:
                             "tested": 0,
                             "passed": 0,
                             "latency_sum": 0.0,
+                            "latency_count": 0,
                             "cost_sum": 0.0,
+                            "cost_count": 0,
                         },
                     )
                     s["tested"] += 1
                     if r.get("tests", {}).get("overall_pass", False):
                         s["passed"] += 1
-                    s["latency_sum"] += r.get("metrics", {}).get("api_latency", 0.0)
-                    s["cost_sum"] += r.get("metrics", {}).get("cost", 0.0)
+                    latency = r.get("metrics", {}).get("api_latency")
+                    if latency is not None:
+                        s["latency_sum"] += latency
+                        s["latency_count"] += 1
+                    cost = r.get("metrics", {}).get("cost")
+                    if cost is not None:
+                        s["cost_sum"] += cost
+                        s["cost_count"] += 1
 
                 for (provider, model), s in stats.items():
                     pass_rate = (s["passed"] / s["tested"] * 100) if s["tested"] else 0
-                    avg_latency = s["latency_sum"] / s["tested"] if s["tested"] else 0
-                    avg_cost = s["cost_sum"] / s["tested"] if s["tested"] else 0
+                    avg_latency = (
+                        s["latency_sum"] / s["latency_count"] if s["latency_count"] else None
+                    )
+                    avg_cost = s["cost_sum"] / s["cost_count"] if s["cost_count"] else None
                     new_table.add_row(
                         provider,
                         model,
                         str(s["tested"]),
                         f"{pass_rate:.1f}%",
-                        f"{avg_latency:.2f}s",
-                        f"${avg_cost:.4f}",
+                        f"{avg_latency:.2f}s" if avg_latency is not None else "N/A",
+                        f"${avg_cost:.4f}" if avg_cost is not None else "N/A",
                     )
 
                 live.update(new_table)
@@ -831,21 +841,27 @@ class Evaluator:
                             "tested": 0,
                             "passed": 0,
                             "latency_sum": 0.0,
+                            "latency_count": 0,
                         },
                     )
                     s["tested"] += 1
                     if r.get("tests", {}).get("overall_pass", False):
                         s["passed"] += 1
-                    s["latency_sum"] += r.get("metrics", {}).get("api_latency", 0.0)
+                    latency = r.get("metrics", {}).get("api_latency")
+                    if latency is not None:
+                        s["latency_sum"] += latency
+                        s["latency_count"] += 1
 
                 for model, s in stats.items():
                     pass_rate = (s["passed"] / s["tested"] * 100) if s["tested"] else 0
-                    avg_latency = s["latency_sum"] / s["tested"] if s["tested"] else 0
+                    avg_latency = (
+                        s["latency_sum"] / s["latency_count"] if s["latency_count"] else None
+                    )
                     new_table.add_row(
                         model,
                         str(s["tested"]),
                         f"{pass_rate:.1f}%",
-                        f"{avg_latency:.2f}s",
+                        f"{avg_latency:.2f}s" if avg_latency is not None else "N/A",
                     )
 
                 live.update(new_table)
@@ -887,16 +903,18 @@ class Evaluator:
                 "temperature": self.temperature,
             },
             "metrics": {
-                "api_latency": 0.0,
-                "cost": 0.0,
+                "api_latency": None,
+                "attempt_latency": None,
+                "cost": None,
+                "cost_available": False,
             },
             "tests": {},
             "error": None,
         }
         logger = logging.getLogger(__name__)
         # Generate MIDI
+        start_time = time.perf_counter()
         try:
-            start_time = time.perf_counter()
             adapter = EvalEngineAdapter(run_path / "core_artifacts")
             midi_file, messages, cost = adapter.generate(
                 description=original_prompt,
@@ -910,9 +928,12 @@ class Evaluator:
             time_elapsed = time.perf_counter() - start_time
 
             result["metrics"]["api_latency"] = time_elapsed
+            result["metrics"]["attempt_latency"] = time_elapsed
             result["metrics"]["cost"] = cost
+            result["metrics"]["cost_available"] = cost is not None
 
         except Exception as e:
+            result["metrics"]["attempt_latency"] = time.perf_counter() - start_time
             logger.error(f"Generation failed for {model}: {e}")
             result["error"] = str(e)
             result["tests"]["overall_pass"] = False
@@ -1014,7 +1035,12 @@ class Evaluator:
                 "overall_pass_count": 0,
                 "overall_pass_rate": 0.0,
                 "total_cost": 0.0,
+                "known_cost_generations": 0,
+                "unknown_cost_generations": 0,
                 "total_time": 0.0,
+                "successful_latency_total": 0.0,
+                "successful_latency_count": 0,
+                "avg_successful_latency": None,
             },
             "by_model": {},
             "by_root": {},
@@ -1031,8 +1057,21 @@ class Evaluator:
             if r.get("tests", {}).get("overall_pass", False):
                 summary["totals"]["overall_pass_count"] += 1
 
-            summary["totals"]["total_cost"] += r.get("metrics", {}).get("cost", 0.0)
-            summary["totals"]["total_time"] += r.get("metrics", {}).get("api_latency", 0.0)
+            metrics = r.get("metrics", {})
+            cost = metrics.get("cost")
+            if cost is None:
+                summary["totals"]["unknown_cost_generations"] += 1
+            else:
+                summary["totals"]["total_cost"] += cost
+                summary["totals"]["known_cost_generations"] += 1
+
+            attempt_latency = metrics.get("attempt_latency", metrics.get("api_latency"))
+            if attempt_latency is not None:
+                summary["totals"]["total_time"] += attempt_latency
+            successful_latency = metrics.get("api_latency")
+            if successful_latency is not None:
+                summary["totals"]["successful_latency_total"] += successful_latency
+                summary["totals"]["successful_latency_count"] += 1
 
             # By model
             model = r["model"]
@@ -1044,8 +1083,11 @@ class Evaluator:
                     "failed": 0,
                     "pass_rate": 0.0,
                     "total_cost": 0.0,
+                    "known_cost_generations": 0,
+                    "unknown_cost_generations": 0,
                     "total_latency": 0.0,
-                    "avg_latency": 0.0,
+                    "successful_latency_count": 0,
+                    "avg_latency": None,
                 }
             m = summary["by_model"][model]
             m["tested"] += 1
@@ -1053,8 +1095,14 @@ class Evaluator:
                 m["passed"] += 1
             if r.get("error"):
                 m["failed"] += 1
-            m["total_cost"] += r.get("metrics", {}).get("cost", 0.0)
-            m["total_latency"] += r.get("metrics", {}).get("api_latency", 0.0)
+            if cost is None:
+                m["unknown_cost_generations"] += 1
+            else:
+                m["total_cost"] += cost
+                m["known_cost_generations"] += 1
+            if successful_latency is not None:
+                m["total_latency"] += successful_latency
+                m["successful_latency_count"] += 1
 
             # By root
             root = r["root"]
@@ -1080,7 +1128,14 @@ class Evaluator:
         for model, m in summary["by_model"].items():
             if m["tested"] > 0:
                 m["pass_rate"] = m["passed"] / m["tested"]
-                m["avg_latency"] = m["total_latency"] / m["tested"]
+                if m["successful_latency_count"]:
+                    m["avg_latency"] = m["total_latency"] / m["successful_latency_count"]
+
+        if summary["totals"]["successful_latency_count"]:
+            summary["totals"]["avg_successful_latency"] = (
+                summary["totals"]["successful_latency_total"]
+                / summary["totals"]["successful_latency_count"]
+            )
 
         for root, r in summary["by_root"].items():
             if r["tested"] > 0:
