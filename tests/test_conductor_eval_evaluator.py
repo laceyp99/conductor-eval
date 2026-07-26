@@ -1,4 +1,6 @@
 import json
+import logging
+import threading
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -20,6 +22,105 @@ def test_harmonic_checks_are_available():
         "harmonic_rhythm",
         "chord_event_positions",
     } <= Evaluator.AVAILABLE_TESTS.keys()
+
+
+def test_evaluator_initialization_preserves_root_logging(tmp_path):
+    root_logger = logging.getLogger()
+    original_level = root_logger.level
+    original_handlers = tuple(root_logger.handlers)
+    sentinel = logging.NullHandler()
+    root_logger.addHandler(sentinel)
+
+    try:
+        output_dir = tmp_path / "evaluations"
+        Evaluator(output_dir=output_dir)
+
+        assert root_logger.level == original_level
+        assert tuple(root_logger.handlers) == (*original_handlers, sentinel)
+        assert not output_dir.exists()
+    finally:
+        root_logger.removeHandler(sentinel)
+
+
+def test_evaluations_keep_logs_and_artifacts_isolated_when_overlapping(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    resolution_barrier = threading.Barrier(2)
+    errors = []
+
+    def resolve_models(models, logger):
+        resolution_barrier.wait(timeout=5)
+        logger.info("Resolving models for %s", threading.current_thread().name)
+        return []
+
+    monkeypatch.setattr(evaluator, "_resolve_models", resolve_models)
+
+    def run_evaluation():
+        try:
+            evaluator.evaluate(
+                prompts="warm loop",
+                roots=["C"],
+                models="none",
+                run_name="same-name",
+            )
+        except Exception as error:
+            errors.append(error)
+
+    threads = [
+        threading.Thread(
+            target=run_evaluation,
+            name=f"evaluation-{index}",
+        )
+        for index in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+    assert not errors
+
+    run_paths = list((tmp_path / "evaluations").iterdir())
+    assert len(run_paths) == 2
+    assert len({path.name for path in run_paths}) == 2
+
+    for run_path in run_paths:
+        log_contents = (run_path / "run.log").read_text(encoding="utf-8")
+        other_paths = [path for path in run_paths if path != run_path]
+        assert (run_path / "config.json").exists()
+        assert (run_path / "summary.json").exists()
+        assert "Starting evaluation 'same-name'" in log_contents
+        assert str(run_path) in log_contents
+        assert all(str(other_path) not in log_contents for other_path in other_paths)
+
+
+def test_failed_evaluation_retains_and_closes_its_run_log(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    def fail_resolution(models, logger):
+        raise RuntimeError("model resolution failed")
+
+    monkeypatch.setattr(evaluator, "_resolve_models", fail_resolution)
+    before_loggers = set(logging.Logger.manager.loggerDict)
+
+    with pytest.raises(RuntimeError, match="model resolution failed"):
+        evaluator.evaluate(
+            prompts="warm loop",
+            roots=["C"],
+            models="none",
+            run_name="failure",
+        )
+
+    run_path = next((tmp_path / "evaluations").iterdir())
+    log_contents = (run_path / "run.log").read_text(encoding="utf-8")
+    created_loggers = set(logging.Logger.manager.loggerDict) - before_loggers
+
+    assert "Evaluation failed. Results remain in" in log_contents
+    assert "RuntimeError: model resolution failed" in log_contents
+    assert all(
+        not logging.getLogger(name).handlers
+        for name in created_loggers
+        if name.startswith("conductor_eval.evaluator.run.")
+    )
 
 
 class RecordingEngine:

@@ -157,25 +157,28 @@ class Evaluator:
         self.output_dir = get_evaluations_dir() if output_dir is None else Path(output_dir)
         self.temperature = temperature
         self.console = Console(force_terminal=True)
-        self._setup_logging()
-
         self.model_info = get_model_info()
 
-    def _setup_logging(self):
-        log_path = self.output_dir / "run.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def _create_run_logger(run_path: Path, run_id: str) -> tuple[logging.Logger, logging.Handler]:
+        """Create an isolated file logger for one evaluation run."""
+        logger = logging.getLogger(f"{__name__}.run.{run_id}")
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
 
-        file_handler = logging.FileHandler(log_path)
+        file_handler = logging.FileHandler(run_path / "run.log", encoding="utf-8")
         file_handler.setFormatter(
             logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
         )
+        logger.addHandler(file_handler)
+        return logger, file_handler
 
-        root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)
-
-        # 🔑 Remove any existing console handlers
-        root_logger.handlers.clear()
-        root_logger.addHandler(file_handler)
+    @staticmethod
+    def _close_run_logger(logger: logging.Logger, handler: logging.Handler) -> None:
+        """Flush and release the file handler owned by one evaluation run."""
+        handler.flush()
+        logger.removeHandler(handler)
+        handler.close()
 
     def evaluate(
         self,
@@ -216,9 +219,14 @@ class Evaluator:
         if isinstance(prompts, str):
             prompts = [prompts]
 
-        # Resolve models to (provider, model) tuples
-        resolved_models = self._resolve_models(models)
+        # Keep an ID in the directory name so same-name runs never share artifacts or logs.
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        run_id = uuid4().hex
+        run_path = self.output_dir / f"{timestamp}_{run_name}_{run_id}"
+        run_path.mkdir(parents=True, exist_ok=False)
+        logger, handler = self._create_run_logger(run_path, run_id)
 
+<<<<<<< HEAD
         # Create a distinct run directory with metadata from one source of truth.
         run_path, run_id, timestamp = self._create_run_directory(run_name)
 
@@ -238,44 +246,71 @@ class Evaluator:
         }
         with open(run_path / "config.json", "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
+=======
+        try:
+            # Resolve models to (provider, model) tuples.
+            resolved_models = self._resolve_models(models, logger)
 
-        # Generate all task combinations
-        tasks = self._generate_tasks(
-            prompts=prompts,
-            roots=roots,
-            resolved_models=resolved_models,
-            tests=tests,
-            test_reasoning=test_reasoning,
-            test_params=test_params,
-        )
-        logger = logging.getLogger(__name__)
-        logger.info(f"Starting evaluation '{run_name}' with {len(tasks)} total tasks")
+            # Save configuration
+            config = {
+                "run_name": run_name,
+                "timestamp": timestamp,
+                "prompts": prompts,
+                "roots": roots,
+                "scales": self.SCALES,
+                "models": [(p, m) for p, m in resolved_models],
+                "tests": tests,
+                "test_params": test_params,
+                "test_reasoning": test_reasoning,
+                "temperature": self.temperature,
+            }
+            with open(run_path / "config.json", "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2)
+>>>>>>> 1e73686 (fix(logging): isolate evaluation run logs)
 
-        # Separate async and sync tasks
-        async_tasks = [t for t in tasks if self._is_async_provider(t["provider"])]
-        sync_tasks = [t for t in tasks if not self._is_async_provider(t["provider"])]
+            # Generate all task combinations
+            tasks = self._generate_tasks(
+                prompts=prompts,
+                roots=roots,
+                resolved_models=resolved_models,
+                tests=tests,
+                test_reasoning=test_reasoning,
+                test_params=test_params,
+            )
+            logger.info("Starting evaluation '%s' with %d total tasks", run_name, len(tasks))
 
-        all_results = []
+            # Separate async and sync tasks
+            async_tasks = [t for t in tasks if self._is_async_provider(t["provider"])]
+            sync_tasks = [t for t in tasks if not self._is_async_provider(t["provider"])]
 
-        # Run async tasks (cloud providers)
-        if async_tasks:
-            logger.info(f"Running {len(async_tasks)} async tasks (cloud providers)")
-            async_results = asyncio.run(self._run_async_batch(async_tasks, run_path, tests))
-            all_results.extend(async_results)
+            all_results = []
 
-        # Run sync tasks (Ollama)
-        if sync_tasks:
-            logger.info(f"Running {len(sync_tasks)} sync tasks (Ollama)")
-            sync_results = self._run_sync_batch(sync_tasks, run_path, tests)
-            all_results.extend(sync_results)
+            # Run async tasks (cloud providers)
+            if async_tasks:
+                logger.info("Running %d async tasks (cloud providers)", len(async_tasks))
+                async_results = asyncio.run(
+                    self._run_async_batch(async_tasks, run_path, tests, logger)
+                )
+                all_results.extend(async_results)
 
-        # Generate and save summary
-        summary = self._generate_summary(all_results, config)
-        with open(run_path / "summary.json", "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2)
+            # Run sync tasks (Ollama)
+            if sync_tasks:
+                logger.info("Running %d sync tasks (Ollama)", len(sync_tasks))
+                sync_results = self._run_sync_batch(sync_tasks, run_path, tests, logger)
+                all_results.extend(sync_results)
 
-        logger.info(f"Evaluation complete. Results saved to {run_path}")
-        return summary
+            # Generate and save summary
+            summary = self._generate_summary(all_results, config)
+            with open(run_path / "summary.json", "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2)
+
+            logger.info("Evaluation complete. Results saved to %s", run_path)
+            return summary
+        except Exception:
+            logger.exception("Evaluation failed. Results remain in %s", run_path)
+            raise
+        finally:
+            self._close_run_logger(logger, handler)
 
     def run_tests(
         self,
@@ -390,7 +425,9 @@ class Evaluator:
             validated[test_name] = dict(params)
         return validated
 
-    def _resolve_models(self, models: Union[str, list[str]]) -> list[tuple[str, str]]:
+    def _resolve_models(
+        self, models: Union[str, list[str]], logger: logging.Logger
+    ) -> list[tuple[str, str]]:
         """
         Resolve model specification to (provider, model_name) tuples.
 
@@ -404,7 +441,6 @@ class Evaluator:
 
         if isinstance(models, str):
             models_lower = models.lower()
-            logger = logging.getLogger(__name__)
             if models_lower == "all":
                 # All cloud models from model_list.json
                 for provider in ["OpenAI", "Anthropic", "Google"]:
@@ -692,7 +728,11 @@ class Evaluator:
         return variations
 
     async def _run_async_batch(
-        self, tasks: list[dict], run_path: Path, tests_to_run: list[str]
+        self,
+        tasks: list[dict],
+        run_path: Path,
+        tests_to_run: list[str],
+        logger: logging.Logger,
     ) -> list[dict]:
         """
         Run tasks asynchronously with rate limiting.
@@ -738,6 +778,7 @@ class Evaluator:
                     task=task,
                     run_path=run_path,
                     tests_to_run=tests_to_run,
+                    logger=logger,
                 )
 
         with Live(table, console=self.console, refresh_per_second=2) as live:
@@ -805,7 +846,11 @@ class Evaluator:
         return results
 
     def _run_sync_batch(
-        self, tasks: list[dict], run_path: Path, tests_to_run: list[str]
+        self,
+        tasks: list[dict],
+        run_path: Path,
+        tests_to_run: list[str],
+        logger: logging.Logger,
     ) -> list[dict]:
         """
         Run tasks synchronously (for Ollama).
@@ -832,7 +877,7 @@ class Evaluator:
 
         with Live(table, console=self.console, refresh_per_second=2) as live:
             for i, task in enumerate(tasks):
-                result = self._run_single(task, run_path, tests_to_run)
+                result = self._run_single(task, run_path, tests_to_run, logger)
                 results.append(result)
 
                 # Update table
@@ -879,7 +924,13 @@ class Evaluator:
 
         return results
 
-    def _run_single(self, task: dict, run_path: Path, tests_to_run: list[str]) -> dict:
+    def _run_single(
+        self,
+        task: dict,
+        run_path: Path,
+        tests_to_run: list[str],
+        logger: logging.Logger | None = None,
+    ) -> dict:
         """
         Run single generation, tests, and save results.
 
@@ -924,7 +975,7 @@ class Evaluator:
             "tests": {},
             "error": None,
         }
-        logger = logging.getLogger(__name__)
+        logger = logger or logging.getLogger(__name__)
         # Generate MIDI
         start_time = time.perf_counter()
         try:
