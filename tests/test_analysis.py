@@ -178,6 +178,28 @@ def test_load_run_flattens_new_check_results(tmp_path):
     assert row["chord_event_positions_unexpected"] == [{"start_beat": 8.0, "end_beat": 10.0}]
 
 
+def test_load_run_uses_persisted_variation_in_new_layout(tmp_path):
+    run_path = _write_run(tmp_path, {})
+    result_path = run_path / "results" / "safe" / "safe" / "safe" / "safe" / "safe" / "task"
+    result_path.mkdir(parents=True)
+    (result_path / "test_results.json").write_text(
+        json.dumps(
+            {
+                "model": "new-model",
+                "provider": "OpenAI",
+                "config": {"variation_name": "high"},
+                "metrics": {},
+                "tests": {"overall_pass": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    df, _, _ = load_run(run_path)
+
+    assert df.loc[df["model"] == "new-model", "variation"].item() == "high"
+
+
 def test_load_run_treats_missing_and_not_run_checks_as_ineligible(tmp_path):
     run_path = _write_run(
         tmp_path,

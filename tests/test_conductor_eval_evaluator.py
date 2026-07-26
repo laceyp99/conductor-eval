@@ -69,7 +69,7 @@ def test_eval_engine_adapter_delegates_generation_to_core(tmp_path):
     ]
 
 
-def test_save_results_uses_per_result_loop_filename(tmp_path):
+def test_save_results_uses_unique_safe_task_directory(tmp_path):
     evaluator = Evaluator(output_dir=str(tmp_path / "evaluations"))
     run_path = tmp_path / "run"
     midi = MidiFile()
@@ -90,11 +90,105 @@ def test_save_results_uses_per_result_loop_filename(tmp_path):
 
     evaluator._save_results(result, midi, messages, run_path, task)
 
-    result_dir = run_path / "results" / "OpenAI" / "gpt-test" / "warm_loop" / "C_major"
+    result_paths = list((run_path / "results").rglob("test_results.json"))
+    assert len(result_paths) == 1
+    result_dir = result_paths[0].parent
     assert (result_dir / "loop.mid").exists()
     legacy_filename = "output" + ".mid"
     assert not (result_dir / legacy_filename).exists()
     assert json.loads((result_dir / "messages.json").read_text(encoding="utf-8")) == messages
+
+
+def test_run_directories_do_not_collide_for_same_name(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    first_path = evaluator._create_run_directory("same name")
+    second_path = evaluator._create_run_directory("same name")
+
+    assert first_path != second_path
+    assert first_path.is_dir()
+    assert second_path.is_dir()
+
+
+def test_save_results_prevents_prompt_slug_collisions_and_overwrites(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    run_path = tmp_path / "run"
+    common_prompt = "x" * 50
+    base_task = {
+        "provider": "OpenAI",
+        "model": "gpt-test",
+        "root": "C",
+        "scale": "major",
+        "variation_name": "standard",
+    }
+
+    evaluator._save_results(
+        {"marker": "first"},
+        None,
+        [],
+        run_path,
+        {**base_task, "original_prompt": f"{common_prompt}A"},
+    )
+    evaluator._save_results(
+        {"marker": "second"},
+        None,
+        [],
+        run_path,
+        {**base_task, "original_prompt": f"{common_prompt}B"},
+    )
+
+    saved = [
+        json.loads(path.read_text(encoding="utf-8"))["marker"]
+        for path in (run_path / "results").rglob("test_results.json")
+    ]
+    assert sorted(saved) == ["first", "second"]
+
+
+def test_save_results_preserves_repeated_identical_tasks(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    run_path = tmp_path / "run"
+    task = {
+        "provider": "OpenAI",
+        "model": "gpt-test",
+        "original_prompt": "same prompt",
+        "root": "C",
+        "scale": "major",
+        "variation_name": "standard",
+    }
+
+    evaluator._save_results({"attempt": 1}, None, [], run_path, task)
+    evaluator._save_results({"attempt": 2}, None, [], run_path, task)
+
+    saved = [
+        json.loads(path.read_text(encoding="utf-8"))["attempt"]
+        for path in (run_path / "results").rglob("test_results.json")
+    ]
+    assert sorted(saved) == [1, 2]
+
+
+def test_safe_path_components_handle_empty_prompts_and_namespaced_models(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    run_path = tmp_path / "run"
+    task = {
+        "provider": "OpenAI",
+        "original_prompt": '/:*?\\"<>|',
+        "root": "C",
+        "scale": "major",
+        "variation_name": "standard",
+    }
+
+    evaluator._save_results(
+        {"model": "first"}, None, [], run_path, {**task, "model": "org/model:v1"}
+    )
+    evaluator._save_results(
+        {"model": "second"}, None, [], run_path, {**task, "model": "org_model_v1"}
+    )
+
+    saved_paths = list((run_path / "results").rglob("test_results.json"))
+    assert len(saved_paths) == 2
+    model_components = {path.relative_to(run_path / "results").parts[1] for path in saved_paths}
+    assert len(model_components) == 2
+    assert all("/" not in component and "\\" not in component for component in model_components)
 
 
 def test_run_tests_routes_polyphony_params_and_updates_overall_pass(tmp_path):

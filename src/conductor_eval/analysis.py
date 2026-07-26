@@ -434,19 +434,17 @@ def load_run(run_path):
         with open(tr_path, "r", encoding="utf-8") as f:
             result = json.load(f)
 
-        # Determine variation from directory structure
+        # New reports persist variation with the result. Fall back to the legacy
+        # directory-depth convention so existing report layouts remain loadable.
+        cfg = result.get("config", {})
+        variation = cfg.get("variation_name")
         rel = tr_path.relative_to(results_dir)
-        parts = (
-            rel.parts
-        )  # e.g. ("Ollama", "model", "prompt_slug", "C_major", "low", "test_results.json")
-        # If there's a subfolder beyond root_scale (5+ parts before the filename), it's a variation
-        if len(parts) > 5:
-            variation = parts[-2]
-        else:
-            variation = "standard"
+        parts = rel.parts
+        if variation is None:
+            # e.g. ("Ollama", "model", "prompt_slug", "C_major", "low", "test_results.json")
+            variation = parts[-2] if len(parts) > 5 else "standard"
 
         tests = result.get("tests", {})
-        cfg = result.get("config", {})
         metrics = result.get("metrics", {})
 
         # Scale test details

@@ -223,7 +223,7 @@ The `scale` test always runs since root and scale are always applied to prompts.
 
 ### Output Structure
 
-Each evaluation run creates a timestamped directory beneath Eval's data
+Each evaluation run creates a timestamped, unique directory beneath Eval's data
 directory (shown here with the default suite root):
 
 ```
@@ -253,6 +253,11 @@ provider metadata for debugging. Eval does not selectively delete those files;
 remove an entire completed run externally when its artifacts are no longer
 needed.
 
+Run directories include microseconds and a UUID. Result directories use one
+safe, readable-and-hashed segment per user-controlled value plus an isolated
+task directory, so no prompt or model normalization can overwrite another
+task's artifacts. The analysis loader remains compatible with legacy layouts.
+
 When using `test_reasoning`, variation subfolders are created:
 
 ```
@@ -275,7 +280,8 @@ Stores the full configuration used for the run:
 ```json
 {
     "run_name": "my_first_eval",
-    "timestamp": "20260207_143022",
+    "timestamp": "20260207_143022_123456",
+    "run_id": "20260207_143022_123456_my_first_eval-<hash>_<uuid>",
     "prompts": ["an arpeggiator using only quarter notes"],
     "roots": ["C", "G"],
     "scales": ["major", "minor"],
@@ -292,7 +298,7 @@ Aggregated statistics for the entire run:
 
 ```json
 {
-    "run_id": "20260207_143022_my_first_eval",
+    "run_id": "20260207_143022_123456_my_first_eval-<hash>_<uuid>",
     "totals": {
         "total_generations": 48,
         "successful_generations": 45,

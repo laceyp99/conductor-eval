@@ -9,12 +9,14 @@ This module provides a flexible evaluation framework that can:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Union
+from uuid import uuid4
 
 from conductor_core import EngineConfig, GenerationRequest, LoopGenerationEngine
 from conductor_core.music import DURATION_KEYWORDS, get_model_info
@@ -217,15 +219,16 @@ class Evaluator:
         # Resolve models to (provider, model) tuples
         resolved_models = self._resolve_models(models)
 
-        # Create run directory
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_path = self.output_dir / f"{timestamp}_{run_name}"
-        run_path.mkdir(parents=True, exist_ok=True)
+        # Create a distinct run directory.
+        run_path = self._create_run_directory(run_name)
+        timestamp = "_".join(run_path.name.split("_", 3)[:3])
+        run_id = run_path.name
 
         # Save configuration
         config = {
             "run_name": run_name,
             "timestamp": timestamp,
+            "run_id": run_id,
             "prompts": prompts,
             "roots": roots,
             "scales": self.SCALES,
@@ -587,6 +590,13 @@ class Evaluator:
                                 }
                             )
 
+        occurrences: dict[str, int] = {}
+        for task in tasks:
+            fingerprint = self._task_fingerprint(task)
+            occurrence = occurrences.get(fingerprint, 0) + 1
+            occurrences[fingerprint] = occurrence
+            task["task_id"] = f"task-{fingerprint[:16]}-{occurrence}"
+
         return tasks
 
     def _generate_variations(self, model: str, provider: str, test_reasoning: bool) -> list[dict]:
@@ -891,6 +901,7 @@ class Evaluator:
 
         # Build result structure
         result = {
+            "task_id": task.get("task_id"),
             "model": model,
             "provider": provider,
             "prompt": full_prompt,
@@ -901,6 +912,7 @@ class Evaluator:
                 "use_thinking": use_thinking,
                 "effort": effort,
                 "temperature": self.temperature,
+                "variation_name": task["variation_name"],
             },
             "metrics": {
                 "api_latency": None,
@@ -982,22 +994,21 @@ class Evaluator:
         scale = task["scale"]
         variation_name = task["variation_name"]
 
-        # Create directory structure
-        prompt_slug = self._sanitize_filename(original_prompt, max_len=50)
-        result_dir = (
+        # Each user-controlled value is represented by one safe path component.
+        # The component hash preserves distinctions that sanitization or truncation
+        # would otherwise erase. A unique task directory is created atomically so
+        # concurrent results cannot overwrite one another.
+        result_parent = (
             run_path
             / "results"
-            / provider
-            / model.replace(":", "")
-            / prompt_slug
-            / f"{root}_{scale}"
+            / self._sanitize_filename(provider)
+            / self._sanitize_filename(model)
+            / self._sanitize_filename(original_prompt)
+            / f"{self._sanitize_filename(root)}_{self._sanitize_filename(scale)}"
+            / self._sanitize_filename(variation_name)
         )
-
-        # Add variation folder if there are multiple variations
-        if variation_name != "standard":
-            result_dir = result_dir / variation_name
-
-        result_dir.mkdir(parents=True, exist_ok=True)
+        task_id = task.get("task_id") or f"task-{self._task_fingerprint(task)[:16]}"
+        result_dir = self._create_result_directory(result_parent, task_id)
 
         # Save MIDI
         if midi_data is not None:
@@ -1026,7 +1037,7 @@ class Evaluator:
             dict: Summary with aggregated statistics
         """
         summary = {
-            "run_id": f"{config['timestamp']}_{config['run_name']}",
+            "run_id": config.get("run_id", f"{config['timestamp']}_{config['run_name']}"),
             "config": config,
             "totals": {
                 "total_generations": len(all_results),
@@ -1158,10 +1169,58 @@ class Evaluator:
         Returns:
             str: Sanitized filename
         """
-        # Replace spaces and special characters
-        safe = text.replace(" ", "_")
-        safe = "".join(c for c in safe if c.isalnum() or c in "_-")
-        return safe[:max_len]
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+        suffix = f"-{digest}"
+        if max_len <= len(suffix):
+            raise ValueError("max_len must leave room for a readable path component")
+
+        safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in text)
+        safe = safe.strip("._-") or "item"
+        readable_length = max_len - len(suffix)
+        safe = safe[:readable_length].rstrip("._-") or "item"
+        return f"{safe}{suffix}"
+
+    def _create_run_directory(self, run_name: str) -> Path:
+        """Create a collision-resistant directory for one evaluation run."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        run_id = f"{timestamp}_{self._sanitize_filename(run_name)}_{uuid4().hex}"
+        run_path = self.output_dir / run_id
+        run_path.mkdir(parents=True)
+        return run_path
+
+    @staticmethod
+    def _task_fingerprint(task: dict) -> str:
+        """Return a stable digest for all task inputs that affect artifacts."""
+        task_inputs = {
+            key: task.get(key)
+            for key in (
+                "provider",
+                "model",
+                "original_prompt",
+                "root",
+                "scale",
+                "variation_name",
+                "use_thinking",
+                "effort",
+                "test_params",
+            )
+        }
+        canonical = json.dumps(task_inputs, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _create_result_directory(result_parent: Path, task_id: str) -> Path:
+        """Atomically allocate a result directory without reusing existing artifacts."""
+        result_parent.mkdir(parents=True, exist_ok=True)
+        for attempt in range(1, 10_001):
+            suffix = "" if attempt == 1 else f"-{attempt}"
+            result_dir = result_parent / f"{task_id}{suffix}"
+            try:
+                result_dir.mkdir()
+            except FileExistsError:
+                continue
+            return result_dir
+        raise RuntimeError(f"Could not allocate a result directory below {result_parent}")
 
 
 def main() -> None:
