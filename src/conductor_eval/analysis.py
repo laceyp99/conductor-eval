@@ -2833,6 +2833,8 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
     total = len(df)
     passed = int(df["overall_pass"].sum())
     pass_rate = round(passed / total * 100, 1) if total > 0 else 0
+    total_reported_cost = df["cost"].sum()
+    known_costs = int(df["cost"].notna().sum())
     escaped_run_name = escape(str(run_name))
     escaped_timestamp = escape(str(timestamp))
 
@@ -2866,7 +2868,7 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
         <div class="stat-card"><div class="label">Total</div><div class="value">{total}</div></div>
         <div class="stat-card"><div class="label">Pass Rate</div><div class="value" style="color: {"#2ecc71" if pass_rate >= 50 else "#e74c3c"}">{pass_rate}%</div></div>
         <div class="stat-card"><div class="label">Passed</div><div class="value">{passed}</div></div>
-        <div class="stat-card"><div class="label">Total Cost</div><div class="value">${df["cost"].sum():.4f}</div></div>
+        <div class="stat-card"><div class="label">Total Reported Cost</div><div class="value">${total_reported_cost:.4f}</div><div class="label">{known_costs}/{total} costs reported</div></div>
     </div>
     {"".join(chart_divs)}
 </body>

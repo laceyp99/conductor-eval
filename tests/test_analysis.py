@@ -72,6 +72,21 @@ def test_combined_html_escapes_run_metadata_and_preserves_unicode():
     assert timestamp in unescape(combined_html)
 
 
+def test_combined_html_reports_known_cost_count():
+    df = pd.DataFrame(
+        [
+            {"model": "reported", "overall_pass": True, "cost": 0.5},
+            {"model": "unknown", "overall_pass": False, "cost": None},
+        ]
+    )
+
+    combined_html = _build_combined_html({}, "run", "timestamp", {}, df)
+
+    assert "Total Reported Cost" in combined_html
+    assert "$0.5000" in combined_html
+    assert "1/2 costs reported" in combined_html
+
+
 def _write_run(tmp_path, tests):
     run_path = tmp_path / "run"
     result_path = run_path / "results" / "OpenAI" / "model" / "prompt" / "C_major"
