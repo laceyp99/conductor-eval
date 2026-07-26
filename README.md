@@ -38,7 +38,7 @@ results = evaluator.evaluate(
     prompts="an arpeggiator using only quarter notes",
     roots=["C", "G", "D"],
     models="openai",
-    run_name="my_first_eval"
+    run_name="my_first_eval",
 )
 ```
 
@@ -134,7 +134,7 @@ results = evaluator.evaluate(
     prompts="an arpeggiator using only quarter notes",
     roots=["C", "G"],
     models="openai",
-    run_name="quarter_note_test"
+    run_name="quarter_note_test",
 )
 ```
 
@@ -153,7 +153,7 @@ results = evaluator.evaluate(
     ],
     roots=["C", "D", "E", "F", "G", "A", "B"],
     models="all",
-    run_name="duration_comparison"
+    run_name="duration_comparison",
 )
 ```
 
@@ -184,7 +184,7 @@ results = evaluator.evaluate(
     roots=["C", "G"],
     models=["o3", "claude-sonnet-4-5"],
     run_name="reasoning_test",
-    test_reasoning=True
+    test_reasoning=True,
 )
 ```
 
@@ -205,7 +205,7 @@ results = evaluator.evaluate(
     roots=["C"],
     models="openai",
     run_name="scale_only_test",
-    tests=["scale"]  # Only run scale test, skip duration
+    tests=["scale"],  # Only run scale test, skip duration
 )
 ```
 
