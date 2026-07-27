@@ -976,6 +976,18 @@ class Evaluator:
             "error": None,
         }
         logger = logger or logging.getLogger(__name__)
+        logger.info(
+            "Starting generation: provider=%s model=%s root=%s scale=%s variation=%s "
+            "use_thinking=%s effort=%s",
+            provider,
+            model,
+            root,
+            scale,
+            task["variation_name"],
+            use_thinking,
+            effort,
+        )
+
         # Generate MIDI
         start_time = time.perf_counter()
         try:
@@ -995,14 +1007,37 @@ class Evaluator:
             result["metrics"]["attempt_latency"] = time_elapsed
             result["metrics"]["cost"] = cost
             result["metrics"]["cost_available"] = cost is not None
+            logger.info(
+                "Generation completed: provider=%s model=%s root=%s scale=%s "
+                "api_latency=%.3fs cost=%s",
+                provider,
+                model,
+                root,
+                scale,
+                time_elapsed,
+                f"${cost:.4f}" if cost is not None else "unavailable",
+            )
 
         except Exception as e:
             result["metrics"]["attempt_latency"] = time.perf_counter() - start_time
-            logger.error(f"Generation failed for {model}: {e}")
+            logger.exception(
+                "Generation failed: provider=%s model=%s root=%s scale=%s",
+                provider,
+                model,
+                root,
+                scale,
+            )
             result["error"] = str(e)
             result["tests"]["overall_pass"] = False
             # Still save the result even on failure
             self._save_results(result, None, [], run_path, task)
+            logger.info(
+                "Saved failed result artifacts: provider=%s model=%s root=%s scale=%s",
+                provider,
+                model,
+                root,
+                scale,
+            )
             return result
 
         # Run tests
@@ -1015,9 +1050,30 @@ class Evaluator:
             test_params=task.get("test_params"),
         )
         result["tests"] = test_results
+        check_outcomes = ", ".join(
+            f"{name}={'passed' if details.get('passed') else 'failed'}"
+            for name, details in test_results.items()
+            if name != "overall_pass" and isinstance(details, dict)
+        )
+        logger.info(
+            "Checks completed: provider=%s model=%s root=%s scale=%s overall_pass=%s checks=%s",
+            provider,
+            model,
+            root,
+            scale,
+            test_results["overall_pass"],
+            check_outcomes or "none",
+        )
 
         # Save results
         self._save_results(result, midi_file, messages, run_path, task)
+        logger.info(
+            "Saved result artifacts: provider=%s model=%s root=%s scale=%s",
+            provider,
+            model,
+            root,
+            scale,
+        )
 
         return result
 

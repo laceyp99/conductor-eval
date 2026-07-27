@@ -487,3 +487,50 @@ def test_failed_generation_records_attempt_latency(monkeypatch, tmp_path):
         "cost": None,
         "cost_available": False,
     }
+
+
+def test_run_log_records_generation_lifecycle(monkeypatch, tmp_path):
+    class SuccessfulAdapter:
+        def __init__(self, output_dir):
+            self.output_dir = output_dir
+
+        def generate(self, **kwargs):
+            return MidiFile(), [{"role": "assistant", "content": "loop"}], 0.125
+
+    monkeypatch.setattr("conductor_eval.evaluator.EvalEngineAdapter", SuccessfulAdapter)
+    monkeypatch.setattr("conductor_eval.evaluator.time.perf_counter", lambda: next(clock))
+    clock = iter([100.0, 101.25])
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    monkeypatch.setattr(
+        evaluator,
+        "run_tests",
+        lambda **kwargs: {"scale": {"passed": True}, "overall_pass": True},
+    )
+    task = {
+        "provider": "OpenAI",
+        "model": "test-model",
+        "full_prompt": "prompt",
+        "original_prompt": "prompt",
+        "root": "C",
+        "scale": "major",
+        "use_thinking": False,
+        "effort": None,
+        "variation_name": "standard",
+    }
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+    logger, handler = evaluator._create_run_logger(run_path, "lifecycle")
+
+    try:
+        result = evaluator._run_single(task, run_path, ["scale"], logger)
+    finally:
+        evaluator._close_run_logger(logger, handler)
+
+    log_contents = (run_path / "run.log").read_text(encoding="utf-8")
+    assert result["metrics"]["api_latency"] == 1.25
+    assert "Starting generation: provider=OpenAI model=test-model" in log_contents
+    assert "Generation completed: provider=OpenAI model=test-model" in log_contents
+    assert "api_latency=1.250s cost=$0.1250" in log_contents
+    assert "Checks completed: provider=OpenAI model=test-model" in log_contents
+    assert "scale=passed" in log_contents
+    assert "Saved result artifacts: provider=OpenAI model=test-model" in log_contents
