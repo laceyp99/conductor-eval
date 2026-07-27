@@ -55,8 +55,8 @@ the stable `eval` project directory beneath that root:
 ~/.conductor/
 └── eval/
     └── evaluations/
-        ├── run.log
-        └── <timestamp>_<run-name>/
+        └── <timestamp>_<run-name>_<uuid>/
+            └── run.log
 ```
 
 The directory precedence, from highest to lowest, is:
@@ -229,6 +229,7 @@ directory (shown here with the default suite root):
 ```
 ~/.conductor/eval/evaluations/
 └── 20260210_224954_123456_my_first_eval-<hash>_<uuid16>/
+    ├── run.log                        # Eval-owned lifecycle and error log
     ├── config.json                    # Full evaluation configuration
     ├── summary.json                   # Aggregated results + statistics
     ├── core_artifacts/                # Core-owned MIDI, messages, and metadata
@@ -255,7 +256,10 @@ beneath `results/` in a directory named
 The fingerprint covers all task inputs and the occurrence always starts at
 `1`, so repeated tasks remain distinct. A run or task directory collision
 fails instead of overwriting artifacts. Result JSON metadata is authoritative;
-the analysis loader does not infer meaning from directory names.
+the analysis loader does not infer meaning from directory names. Each run owns
+one non-propagating `run.log`, which records run start and completion plus
+contextual task and run failures. Eval does not capture prompts, provider
+payloads, or host/root logger output.
 
 When using `test_reasoning`, each variation receives its own task directory;
 the variation is recorded in `test_results.json` rather than a subfolder:
@@ -441,7 +445,8 @@ The evaluator continues on failures, logging errors and saving partial results:
 - API errors are captured in `test_results.json` with an `"error"` field
 - Failed generations are counted in `summary.json` under `failed_generations`
 - Core generation or MIDI conversion errors are logged but don't halt the evaluation
-- All logs are written to `<output_dir>/run.log`
+- Eval-owned logs are written to `<output_dir>/<run-id>/run.log`
+- Host application, root logger, and unrelated library output are not redirected
 
 ## Performance Notes
 

@@ -42,17 +42,73 @@ def test_evaluator_initialization_preserves_root_logging(tmp_path):
         root_logger.removeHandler(sentinel)
 
 
+def test_successful_evaluation_log_is_minimal(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    evaluator.evaluate(
+        prompts="warm loop",
+        roots=["C"],
+        models=[],
+        run_name="minimal",
+    )
+
+    run_path = next((tmp_path / "evaluations").iterdir())
+    log_contents = (run_path / "run.log").read_text(encoding="utf-8")
+
+    assert "Starting evaluation 'minimal' with 0 total tasks" in log_contents
+    assert "Evaluation complete. Results saved to" in log_contents
+    assert "Generation completed" not in log_contents
+    assert "Checks completed" not in log_contents
+    assert "Saved result artifacts" not in log_contents
+
+
 def test_evaluations_keep_logs_and_artifacts_isolated_when_overlapping(monkeypatch, tmp_path):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
     resolution_barrier = threading.Barrier(2)
+    task_barrier = threading.Barrier(2)
     errors = []
+    run_uuids = iter(["a" * 32, "b" * 32])
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 26, 12, 34, 56, 789012, tzinfo=tz)
 
     def resolve_models(models, logger):
         resolution_barrier.wait(timeout=5)
-        logger.info("Resolving models for %s", threading.current_thread().name)
-        return []
+        marker = threading.current_thread().name
+        logger.info("Resolving models for %s", marker)
+        return [("Ollama", marker)]
 
+    def generate_tasks(**kwargs):
+        marker = kwargs["resolved_models"][0][1]
+        return [{"provider": "Ollama", "model": marker, "marker": marker}]
+
+    def run_single(task, run_path, tests_to_run, logger):
+        task_barrier.wait(timeout=5)
+        logger.info("Running task marker=%s", task["marker"])
+        return {
+            "provider": task["provider"],
+            "model": task["model"],
+            "root": "C",
+            "scale": "major",
+            "metrics": {
+                "api_latency": 1.0,
+                "attempt_latency": 1.0,
+                "cost": 0.0,
+            },
+            "tests": {"overall_pass": True},
+            "error": None,
+        }
+
+    monkeypatch.setattr("conductor_eval.evaluator.datetime", FixedDatetime)
+    monkeypatch.setattr(
+        "conductor_eval.evaluator.uuid4",
+        lambda: SimpleNamespace(hex=next(run_uuids)),
+    )
     monkeypatch.setattr(evaluator, "_resolve_models", resolve_models)
+    monkeypatch.setattr(evaluator, "_generate_tasks", generate_tasks)
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
 
     def run_evaluation():
         try:
@@ -82,25 +138,43 @@ def test_evaluations_keep_logs_and_artifacts_isolated_when_overlapping(monkeypat
     run_paths = list((tmp_path / "evaluations").iterdir())
     assert len(run_paths) == 2
     assert len({path.name for path in run_paths}) == 2
+    assert all(path.name.startswith("20260726_123456_789012_same-name-") for path in run_paths)
 
     for run_path in run_paths:
         log_contents = (run_path / "run.log").read_text(encoding="utf-8")
+        config = json.loads((run_path / "config.json").read_text(encoding="utf-8"))
+        summary = json.loads((run_path / "summary.json").read_text(encoding="utf-8"))
         other_paths = [path for path in run_paths if path != run_path]
-        assert (run_path / "config.json").exists()
-        assert (run_path / "summary.json").exists()
+        marker = config["models"][0][1]
+        other_marker = next(
+            json.loads((path / "config.json").read_text(encoding="utf-8"))["models"][0][1]
+            for path in other_paths
+        )
+        assert config["run_id"] == run_path.name
+        assert summary["run_id"] == run_path.name
         assert "Starting evaluation 'same-name'" in log_contents
+        assert f"Running task marker={marker}" in log_contents
+        assert f"Running task marker={other_marker}" not in log_contents
         assert str(run_path) in log_contents
         assert all(str(other_path) not in log_contents for other_path in other_paths)
 
 
 def test_failed_evaluation_retains_and_closes_its_run_log(monkeypatch, tmp_path):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    created_logger = None
+    created_handler = None
+    create_run_logger = evaluator._create_run_logger
 
     def fail_resolution(models, logger):
         raise RuntimeError("model resolution failed")
 
+    def track_run_logger(run_path, run_id):
+        nonlocal created_logger, created_handler
+        created_logger, created_handler = create_run_logger(run_path, run_id)
+        return created_logger, created_handler
+
     monkeypatch.setattr(evaluator, "_resolve_models", fail_resolution)
-    before_loggers = set(logging.Logger.manager.loggerDict)
+    monkeypatch.setattr(evaluator, "_create_run_logger", track_run_logger)
 
     with pytest.raises(RuntimeError, match="model resolution failed"):
         evaluator.evaluate(
@@ -112,15 +186,16 @@ def test_failed_evaluation_retains_and_closes_its_run_log(monkeypatch, tmp_path)
 
     run_path = next((tmp_path / "evaluations").iterdir())
     log_contents = (run_path / "run.log").read_text(encoding="utf-8")
-    created_loggers = set(logging.Logger.manager.loggerDict) - before_loggers
 
-    assert "Evaluation failed. Results remain in" in log_contents
-    assert "RuntimeError: model resolution failed" in log_contents
-    assert all(
-        not logging.getLogger(name).handlers
-        for name in created_loggers
-        if name.startswith("conductor_eval.evaluator.run.")
-    )
+    assert "Evaluation failed: run_path=" in log_contents
+    assert "error_type=RuntimeError" in log_contents
+    assert "Traceback:" in log_contents
+    assert "model resolution failed" not in log_contents
+    assert created_logger is not None
+    assert created_handler is not None
+    assert created_logger.name not in logging.Logger.manager.loggerDict
+    assert not created_logger.handlers
+    assert created_handler.stream is None
 
 
 class RecordingEngine:
@@ -442,9 +517,14 @@ def test_summary_preserves_unknown_costs_and_excludes_failed_latency(tmp_path):
                 "error": "timed out",
             },
         ],
-        {"timestamp": "20260723_000000", "run_name": "metric-contract"},
+        {
+            "run_id": "20260723_000000_metric-contract_abc123",
+            "timestamp": "20260723_000000",
+            "run_name": "metric-contract",
+        },
     )
 
+    assert summary["run_id"] == "20260723_000000_metric-contract_abc123"
     assert summary["totals"]["total_cost"] == 0.25
     assert summary["totals"]["known_cost_generations"] == 1
     assert summary["totals"]["unknown_cost_generations"] == 1
@@ -453,7 +533,7 @@ def test_summary_preserves_unknown_costs_and_excludes_failed_latency(tmp_path):
     assert summary["by_model"]["unknown"]["avg_latency"] is None
 
 
-def test_failed_generation_records_attempt_latency(monkeypatch, tmp_path):
+def test_failed_generation_records_attempt_latency_and_contextual_log(monkeypatch, tmp_path):
     class FailingAdapter:
         def __init__(self, output_dir):
             self.output_dir = output_dir
@@ -468,8 +548,8 @@ def test_failed_generation_records_attempt_latency(monkeypatch, tmp_path):
     task = {
         "provider": "OpenAI",
         "model": "test-model",
-        "full_prompt": "prompt",
-        "original_prompt": "prompt",
+        "full_prompt": "sensitive prompt",
+        "original_prompt": "sensitive prompt",
         "root": "C",
         "scale": "major",
         "use_thinking": False,
@@ -478,7 +558,13 @@ def test_failed_generation_records_attempt_latency(monkeypatch, tmp_path):
         "task_id": "task-prompt-0123456789abcdef-1",
     }
 
-    result = evaluator._run_single(task, tmp_path / "run", ["scale"])
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+    logger, handler = evaluator._create_run_logger(run_path, "failure")
+    try:
+        result = evaluator._run_single(task, run_path, ["scale"], logger)
+    finally:
+        evaluator._close_run_logger(logger, handler)
 
     assert result["error"] == "provider timed out"
     assert result["metrics"] == {
@@ -487,9 +573,15 @@ def test_failed_generation_records_attempt_latency(monkeypatch, tmp_path):
         "cost": None,
         "cost_available": False,
     }
+    log_contents = (run_path / "run.log").read_text(encoding="utf-8")
+    assert "Task failed: task_id=task-prompt-0123456789abcdef-1" in log_contents
+    assert "provider=OpenAI model=test-model root=C scale=major variation=standard" in log_contents
+    assert "error_type=RuntimeError" in log_contents
+    assert "Traceback:" in log_contents
+    assert "sensitive prompt" not in log_contents
 
 
-def test_run_log_records_generation_lifecycle(monkeypatch, tmp_path):
+def test_run_log_excludes_task_success_telemetry(monkeypatch, tmp_path):
     class SuccessfulAdapter:
         def __init__(self, output_dir):
             self.output_dir = output_dir
@@ -528,9 +620,4 @@ def test_run_log_records_generation_lifecycle(monkeypatch, tmp_path):
 
     log_contents = (run_path / "run.log").read_text(encoding="utf-8")
     assert result["metrics"]["api_latency"] == 1.25
-    assert "Starting generation: provider=OpenAI model=test-model" in log_contents
-    assert "Generation completed: provider=OpenAI model=test-model" in log_contents
-    assert "api_latency=1.250s cost=$0.1250" in log_contents
-    assert "Checks completed: provider=OpenAI model=test-model" in log_contents
-    assert "scale=passed" in log_contents
-    assert "Saved result artifacts: provider=OpenAI model=test-model" in log_contents
+    assert log_contents == ""

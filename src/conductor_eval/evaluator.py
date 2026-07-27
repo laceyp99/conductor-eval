@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Union
@@ -162,7 +163,7 @@ class Evaluator:
     @staticmethod
     def _create_run_logger(run_path: Path, run_id: str) -> tuple[logging.Logger, logging.Handler]:
         """Create an isolated file logger for one evaluation run."""
-        logger = logging.getLogger(f"{__name__}.run.{run_id}")
+        logger = logging.Logger(f"{__name__}.run.{run_id}")
         logger.setLevel(logging.INFO)
         logger.propagate = False
 
@@ -219,40 +220,16 @@ class Evaluator:
         if isinstance(prompts, str):
             prompts = [prompts]
 
-        # Keep an ID in the directory name so same-name runs never share artifacts or logs.
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        run_id = uuid4().hex
-        run_path = self.output_dir / f"{timestamp}_{run_name}_{run_id}"
-        run_path.mkdir(parents=True, exist_ok=False)
+        run_path, run_id, timestamp = self._create_run_directory(run_name)
         logger, handler = self._create_run_logger(run_path, run_id)
 
-<<<<<<< HEAD
-        # Create a distinct run directory with metadata from one source of truth.
-        run_path, run_id, timestamp = self._create_run_directory(run_name)
-
-        # Save configuration
-        config = {
-            "run_name": run_name,
-            "timestamp": timestamp,
-            "run_id": run_id,
-            "prompts": prompts,
-            "roots": roots,
-            "scales": self.SCALES,
-            "models": [(p, m) for p, m in resolved_models],
-            "tests": tests,
-            "test_params": test_params,
-            "test_reasoning": test_reasoning,
-            "temperature": self.temperature,
-        }
-        with open(run_path / "config.json", "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
-=======
         try:
             # Resolve models to (provider, model) tuples.
             resolved_models = self._resolve_models(models, logger)
 
             # Save configuration
             config = {
+                "run_id": run_id,
                 "run_name": run_name,
                 "timestamp": timestamp,
                 "prompts": prompts,
@@ -266,7 +243,6 @@ class Evaluator:
             }
             with open(run_path / "config.json", "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
->>>>>>> 1e73686 (fix(logging): isolate evaluation run logs)
 
             # Generate all task combinations
             tasks = self._generate_tasks(
@@ -287,7 +263,6 @@ class Evaluator:
 
             # Run async tasks (cloud providers)
             if async_tasks:
-                logger.info("Running %d async tasks (cloud providers)", len(async_tasks))
                 async_results = asyncio.run(
                     self._run_async_batch(async_tasks, run_path, tests, logger)
                 )
@@ -295,7 +270,6 @@ class Evaluator:
 
             # Run sync tasks (Ollama)
             if sync_tasks:
-                logger.info("Running %d sync tasks (Ollama)", len(sync_tasks))
                 sync_results = self._run_sync_batch(sync_tasks, run_path, tests, logger)
                 all_results.extend(sync_results)
 
@@ -306,8 +280,13 @@ class Evaluator:
 
             logger.info("Evaluation complete. Results saved to %s", run_path)
             return summary
-        except Exception:
-            logger.exception("Evaluation failed. Results remain in %s", run_path)
+        except Exception as error:
+            logger.error(
+                "Evaluation failed: run_path=%s error_type=%s\nTraceback:\n%s",
+                run_path,
+                type(error).__name__,
+                "".join(traceback.format_tb(error.__traceback__)),
+            )
             raise
         finally:
             self._close_run_logger(logger, handler)
@@ -452,7 +431,7 @@ class Evaluator:
                     for model in ollama_api.get_model_list():
                         resolved.append(("Ollama", model))
                 except Exception:
-                    logger.warning("Could not load Ollama models")
+                    pass
 
             elif models_lower == "openai":
                 for model in self.model_info["models"]["OpenAI"].keys():
@@ -471,7 +450,7 @@ class Evaluator:
                     for model in ollama_api.get_model_list():
                         resolved.append(("Ollama", model))
                 except Exception:
-                    logger.warning("Could not load Ollama models")
+                    pass
 
             else:
                 # Assume it's a single model name
@@ -487,7 +466,7 @@ class Evaluator:
                 if provider:
                     resolved.append((provider, model))
                 else:
-                    logger.warning(f"Unknown model: {model}, skipping")
+                    pass
 
         return resolved
 
@@ -975,18 +954,7 @@ class Evaluator:
             "tests": {},
             "error": None,
         }
-        logger = logger or logging.getLogger(__name__)
-        logger.info(
-            "Starting generation: provider=%s model=%s root=%s scale=%s variation=%s "
-            "use_thinking=%s effort=%s",
-            provider,
-            model,
-            root,
-            scale,
-            task["variation_name"],
-            use_thinking,
-            effort,
-        )
+        logger = logger or logging.Logger(__name__)
 
         # Generate MIDI
         start_time = time.perf_counter()
@@ -1007,37 +975,24 @@ class Evaluator:
             result["metrics"]["attempt_latency"] = time_elapsed
             result["metrics"]["cost"] = cost
             result["metrics"]["cost_available"] = cost is not None
-            logger.info(
-                "Generation completed: provider=%s model=%s root=%s scale=%s "
-                "api_latency=%.3fs cost=%s",
-                provider,
-                model,
-                root,
-                scale,
-                time_elapsed,
-                f"${cost:.4f}" if cost is not None else "unavailable",
-            )
-
         except Exception as e:
             result["metrics"]["attempt_latency"] = time.perf_counter() - start_time
-            logger.exception(
-                "Generation failed: provider=%s model=%s root=%s scale=%s",
+            logger.error(
+                "Task failed: task_id=%s provider=%s model=%s root=%s scale=%s variation=%s "
+                "error_type=%s\nTraceback:\n%s",
+                task.get("task_id"),
                 provider,
                 model,
                 root,
                 scale,
+                task["variation_name"],
+                type(e).__name__,
+                "".join(traceback.format_tb(e.__traceback__)),
             )
             result["error"] = str(e)
             result["tests"]["overall_pass"] = False
             # Still save the result even on failure
             self._save_results(result, None, [], run_path, task)
-            logger.info(
-                "Saved failed result artifacts: provider=%s model=%s root=%s scale=%s",
-                provider,
-                model,
-                root,
-                scale,
-            )
             return result
 
         # Run tests
@@ -1050,30 +1005,8 @@ class Evaluator:
             test_params=task.get("test_params"),
         )
         result["tests"] = test_results
-        check_outcomes = ", ".join(
-            f"{name}={'passed' if details.get('passed') else 'failed'}"
-            for name, details in test_results.items()
-            if name != "overall_pass" and isinstance(details, dict)
-        )
-        logger.info(
-            "Checks completed: provider=%s model=%s root=%s scale=%s overall_pass=%s checks=%s",
-            provider,
-            model,
-            root,
-            scale,
-            test_results["overall_pass"],
-            check_outcomes or "none",
-        )
-
         # Save results
         self._save_results(result, midi_file, messages, run_path, task)
-        logger.info(
-            "Saved result artifacts: provider=%s model=%s root=%s scale=%s",
-            provider,
-            model,
-            root,
-            scale,
-        )
 
         return result
 
@@ -1126,7 +1059,7 @@ class Evaluator:
             dict: Summary with aggregated statistics
         """
         summary = {
-            "run_id": config.get("run_id", f"{config['timestamp']}_{config['run_name']}"),
+            "run_id": config["run_id"],
             "config": config,
             "totals": {
                 "total_generations": len(all_results),
