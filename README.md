@@ -228,22 +228,17 @@ directory (shown here with the default suite root):
 
 ```
 ~/.conductor/eval/evaluations/
-└── 20260210_224954_my_first_eval/
+└── 20260210_224954_123456_my_first_eval-<hash>_<uuid16>/
     ├── config.json                    # Full evaluation configuration
     ├── summary.json                   # Aggregated results + statistics
     ├── core_artifacts/                # Core-owned MIDI, messages, and metadata
     ├── analysis/                      # Created by dashboard export
     │   └── dashboard.html
     └── results/
-        └── OpenAI/
-            └── gpt-5/
-                └── an_arpeggiator_using_only_quarter_notes/
-                    ├── C_major/
-                    │   ├── loop.mid           # Generated MIDI file
-                    │   ├── messages.json      # Chat history (for fine-tuning)
-                    │   └── test_results.json  # Individual test results
-                    └── C_minor/
-                        └── ...
+        └── task-an_arpeggiator_using-<fingerprint>-1/
+            ├── loop.mid           # Generated MIDI file
+            ├── messages.json      # Chat history (for fine-tuning)
+            └── test_results.json  # Individual test results and task metadata
 ```
 
 The evaluator intentionally retains `core_artifacts/` after copying MIDI and
@@ -253,24 +248,26 @@ provider metadata for debugging. Eval does not selectively delete those files;
 remove an entire completed run externally when its artifacts are no longer
 needed.
 
-Run directories include microseconds and a UUID. Result directories use one
-safe, readable-and-hashed segment per user-controlled value plus an isolated
-task directory, so no prompt or model normalization can overwrite another
-task's artifacts. The analysis loader remains compatible with legacy layouts.
+Run directories include microseconds, a hash-backed 32-character run-name
+component, and a 16-character UUID suffix. Each result is stored directly
+beneath `results/` in a directory named
+`task-<32-character sanitized prompt>-<16-character fingerprint>-<occurrence>`.
+The fingerprint covers all task inputs and the occurrence always starts at
+`1`, so repeated tasks remain distinct. A run or task directory collision
+fails instead of overwriting artifacts. Result JSON metadata is authoritative;
+the analysis loader does not infer meaning from directory names.
 
-When using `test_reasoning`, variation subfolders are created:
+When using `test_reasoning`, each variation receives its own task directory;
+the variation is recorded in `test_results.json` rather than a subfolder:
 
 ```
-# With test_reasoning=True (effort levels as subfolders)
-C_major/
-├── none/                   # No reasoning effort
-│   ├── loop.mid
-│   ├── messages.json
-│   └── test_results.json
-├── low/
-├── medium/
-├── high/
-└── xhigh/
+# With test_reasoning=True
+results/
+├── task-an_arpeggiator_using-<fingerprint-none>-1/    # variation: none
+├── task-an_arpeggiator_using-<fingerprint-low>-1/     # variation: low
+├── task-an_arpeggiator_using-<fingerprint-medium>-1/  # variation: medium
+├── task-an_arpeggiator_using-<fingerprint-high>-1/    # variation: high
+└── task-an_arpeggiator_using-<fingerprint-xhigh>-1/   # variation: xhigh
 ```
 
 #### config.json
@@ -281,7 +278,7 @@ Stores the full configuration used for the run:
 {
     "run_name": "my_first_eval",
     "timestamp": "20260207_143022_123456",
-    "run_id": "20260207_143022_123456_my_first_eval-<hash>_<uuid>",
+    "run_id": "20260207_143022_123456_my_first_eval-<hash>_<uuid16>",
     "prompts": ["an arpeggiator using only quarter notes"],
     "roots": ["C", "G"],
     "scales": ["major", "minor"],
@@ -298,7 +295,7 @@ Aggregated statistics for the entire run:
 
 ```json
 {
-    "run_id": "20260207_143022_123456_my_first_eval-<hash>_<uuid>",
+    "run_id": "20260207_143022_123456_my_first_eval-<hash>_<uuid16>",
     "totals": {
         "total_generations": 48,
         "successful_generations": 45,
@@ -329,6 +326,7 @@ Individual results for each generation:
 
 ```json
 {
+    "task_id": "task-an_arpeggiator_using-<fingerprint>-1",
     "model": "gpt-5",
     "provider": "OpenAI",
     "prompt": "an arpeggiator using only quarter notes in C major",
@@ -338,7 +336,8 @@ Individual results for each generation:
     "config": {
         "use_thinking": false,
         "effort": null,
-        "temperature": 0.0
+        "temperature": 0.0,
+        "variation_name": "standard"
     },
     "metrics": {
         "api_latency": 2.34,
