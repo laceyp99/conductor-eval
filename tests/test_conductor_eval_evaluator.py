@@ -1,10 +1,12 @@
 import json
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 from conductor_core import GenerationRequest
 from mido import Message, MidiFile
 
+import conductor_eval.evaluator as evaluator_module
 from conductor_eval import EvalEngineAdapter, Evaluator
 
 
@@ -69,7 +71,7 @@ def test_eval_engine_adapter_delegates_generation_to_core(tmp_path):
     ]
 
 
-def test_save_results_uses_per_result_loop_filename(tmp_path):
+def test_save_results_uses_unique_safe_task_directory(tmp_path):
     evaluator = Evaluator(output_dir=str(tmp_path / "evaluations"))
     run_path = tmp_path / "run"
     midi = MidiFile()
@@ -86,15 +88,105 @@ def test_save_results_uses_per_result_loop_filename(tmp_path):
         "root": "C",
         "scale": "major",
         "variation_name": "standard",
+        "task_id": "task-warm_loop-0123456789abcdef-1",
     }
 
     evaluator._save_results(result, midi, messages, run_path, task)
 
-    result_dir = run_path / "results" / "OpenAI" / "gpt-test" / "warm_loop" / "C_major"
+    result_dir = run_path / "results" / task["task_id"]
     assert (result_dir / "loop.mid").exists()
     legacy_filename = "output" + ".mid"
     assert not (result_dir / legacy_filename).exists()
     assert json.loads((result_dir / "messages.json").read_text(encoding="utf-8")) == messages
+
+
+def test_create_run_directory_returns_compact_authoritative_metadata(tmp_path, monkeypatch):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    frozen_time = datetime(2026, 7, 28, 12, 34, 56, 789012)
+    monkeypatch.setattr(evaluator_module, "datetime", SimpleNamespace(now=lambda: frozen_time))
+    monkeypatch.setattr(
+        evaluator_module,
+        "uuid4",
+        lambda: SimpleNamespace(hex="0123456789abcdef" * 2),
+    )
+
+    run_path, run_id, timestamp = evaluator._create_run_directory("same name")
+
+    assert timestamp == "20260728_123456_789012"
+    assert run_id == "20260728_123456_789012_same_name-f03c3f373761_0123456789abcdef"
+    assert run_path.name == run_id
+    assert run_path.is_dir()
+
+
+def test_create_run_directory_fails_for_exact_collision(tmp_path, monkeypatch):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    monkeypatch.setattr(
+        evaluator_module,
+        "datetime",
+        SimpleNamespace(now=lambda: datetime(2026, 7, 28, 12, 34, 56, 789012)),
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "uuid4",
+        lambda: SimpleNamespace(hex="0123456789abcdef" * 2),
+    )
+
+    evaluator._create_run_directory("same name")
+
+    with pytest.raises(FileExistsError):
+        evaluator._create_run_directory("same name")
+
+
+def test_generate_tasks_uses_distinct_ids_for_normalization_collisions(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    tasks = evaluator._generate_tasks(
+        prompts=["warm/loop", "warm_loop"],
+        roots=["C"],
+        resolved_models=[("OpenAI", "gpt-test")],
+        tests=["scale"],
+        test_reasoning=False,
+    )
+
+    assert len({task["task_id"] for task in tasks}) == len(tasks)
+    assert all(task["task_id"].startswith("task-warm_loop-") for task in tasks)
+    assert all(len(task["task_id"].split("-")[-2]) == 16 for task in tasks)
+
+
+def test_generate_tasks_qualifies_repeated_identical_tasks_with_occurrences(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    tasks = evaluator._generate_tasks(
+        prompts=["same prompt"] * 3,
+        roots=["C"],
+        resolved_models=[("OpenAI", "gpt-test")],
+        tests=["scale"],
+        test_reasoning=False,
+    )
+
+    major_ids = [task["task_id"] for task in tasks if task["scale"] == "major"]
+    assert [task_id.rsplit("-", 1)[-1] for task_id in major_ids] == ["1", "2", "3"]
+
+
+def test_save_results_uses_compact_task_directory_and_fails_on_collision(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    run_path = tmp_path / "run"
+    task = {
+        "provider": "OpenAI",
+        "model": "org/model:v1",
+        "original_prompt": "x" * 500,
+        "root": "C",
+        "scale": "major",
+        "variation_name": "standard",
+        "task_id": "task-" + ("x" * 18) + "-0123456789abcdef-1",
+    }
+
+    evaluator._save_results({"task_id": task["task_id"]}, None, [], run_path, task)
+
+    result_dir = run_path / "results" / task["task_id"]
+    assert (result_dir / "test_results.json").exists()
+    assert len(str(result_dir.relative_to(run_path))) < 100
+
+    with pytest.raises(FileExistsError):
+        evaluator._save_results({"task_id": task["task_id"]}, None, [], run_path, task)
 
 
 def test_run_tests_routes_polyphony_params_and_updates_overall_pass(tmp_path):
@@ -282,6 +374,7 @@ def test_failed_generation_records_attempt_latency(monkeypatch, tmp_path):
         "use_thinking": False,
         "effort": None,
         "variation_name": "standard",
+        "task_id": "task-prompt-0123456789abcdef-1",
     }
 
     result = evaluator._run_single(task, tmp_path / "run", ["scale"])

@@ -89,7 +89,7 @@ def test_combined_html_reports_known_cost_count():
 
 def _write_run(tmp_path, tests):
     run_path = tmp_path / "run"
-    result_path = run_path / "results" / "OpenAI" / "model" / "prompt" / "C_major"
+    result_path = run_path / "results" / "task-baseline-0123456789abcdef-1"
     result_path.mkdir(parents=True)
     (run_path / "config.json").write_text(
         json.dumps({"run_name": "analysis-test", "test_reasoning": False}),
@@ -98,13 +98,14 @@ def _write_run(tmp_path, tests):
     (result_path / "test_results.json").write_text(
         json.dumps(
             {
+                "task_id": "task-baseline-0123456789abcdef-1",
                 "model": "model",
                 "provider": "OpenAI",
                 "prompt": "prompt in C major",
                 "original_prompt": "prompt",
                 "root": "C",
                 "scale": "major",
-                "config": {},
+                "config": {"variation_name": "standard"},
                 "metrics": {},
                 "tests": {"overall_pass": False, **tests},
             }
@@ -176,6 +177,54 @@ def test_load_run_flattens_new_check_results(tmp_path):
     assert row["harmonic_rhythm_unexpected_onsets"] == [6.0]
     assert row["chord_event_positions_missing"] == [{"start_beat": 8.0, "end_beat": 12.0}]
     assert row["chord_event_positions_unexpected"] == [{"start_beat": 8.0, "end_beat": 10.0}]
+
+
+def test_load_run_uses_persisted_metadata_with_arbitrary_task_directory_names(tmp_path):
+    run_path = _write_run(tmp_path, {})
+    result_path = run_path / "results" / "this-directory-name-has-no-meaning"
+    result_path.mkdir(parents=True)
+    (result_path / "test_results.json").write_text(
+        json.dumps(
+            {
+                "task_id": "task-readable-0123456789abcdef-1",
+                "model": "new-model",
+                "provider": "OpenAI",
+                "config": {"variation_name": "high"},
+                "metrics": {},
+                "tests": {"overall_pass": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    df, _, _ = load_run(run_path)
+
+    assert df.loc[df["model"] == "new-model", "variation"].item() == "high"
+    assert df.loc[df["model"] == "new-model", "task_id"].item() == (
+        "task-readable-0123456789abcdef-1"
+    )
+
+
+def test_load_run_does_not_infer_variation_from_task_directory_name(tmp_path):
+    run_path = _write_run(tmp_path, {})
+    result_path = run_path / "results" / "definitely-not-a-variation"
+    result_path.mkdir(parents=True)
+    (result_path / "test_results.json").write_text(
+        json.dumps(
+            {
+                "model": "missing-variation",
+                "provider": "OpenAI",
+                "config": {},
+                "metrics": {},
+                "tests": {"overall_pass": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    df, _, _ = load_run(run_path)
+
+    assert df.loc[df["model"] == "missing-variation", "variation"].item() == "unknown"
 
 
 def test_load_run_treats_missing_and_not_run_checks_as_ineligible(tmp_path):

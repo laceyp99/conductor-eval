@@ -9,12 +9,14 @@ This module provides a flexible evaluation framework that can:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Union
+from uuid import uuid4
 
 from conductor_core import EngineConfig, GenerationRequest, LoopGenerationEngine
 from conductor_core.music import DURATION_KEYWORDS, get_model_info
@@ -217,15 +219,14 @@ class Evaluator:
         # Resolve models to (provider, model) tuples
         resolved_models = self._resolve_models(models)
 
-        # Create run directory
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_path = self.output_dir / f"{timestamp}_{run_name}"
-        run_path.mkdir(parents=True, exist_ok=True)
+        # Create a distinct run directory with metadata from one source of truth.
+        run_path, run_id, timestamp = self._create_run_directory(run_name)
 
         # Save configuration
         config = {
             "run_name": run_name,
             "timestamp": timestamp,
+            "run_id": run_id,
             "prompts": prompts,
             "roots": roots,
             "scales": self.SCALES,
@@ -587,6 +588,16 @@ class Evaluator:
                                 }
                             )
 
+        occurrences: dict[str, int] = {}
+        for task in tasks:
+            fingerprint = self._task_fingerprint(task)
+            occurrence = occurrences.get(fingerprint, 0) + 1
+            occurrences[fingerprint] = occurrence
+            task["task_id"] = (
+                f"task-{self._sanitize_filename(task['original_prompt'], max_len=32)}-"
+                f"{fingerprint[:16]}-{occurrence}"
+            )
+
         return tasks
 
     def _generate_variations(self, model: str, provider: str, test_reasoning: bool) -> list[dict]:
@@ -891,6 +902,7 @@ class Evaluator:
 
         # Build result structure
         result = {
+            "task_id": task.get("task_id"),
             "model": model,
             "provider": provider,
             "prompt": full_prompt,
@@ -901,6 +913,7 @@ class Evaluator:
                 "use_thinking": use_thinking,
                 "effort": effort,
                 "temperature": self.temperature,
+                "variation_name": task["variation_name"],
             },
             "metrics": {
                 "api_latency": None,
@@ -975,29 +988,9 @@ class Evaluator:
             run_path: Base path for this run
             task: Task dictionary with path info
         """
-        provider = task["provider"]
-        model = task["model"]
-        original_prompt = task["original_prompt"]
-        root = task["root"]
-        scale = task["scale"]
-        variation_name = task["variation_name"]
-
-        # Create directory structure
-        prompt_slug = self._sanitize_filename(original_prompt, max_len=50)
-        result_dir = (
-            run_path
-            / "results"
-            / provider
-            / model.replace(":", "")
-            / prompt_slug
-            / f"{root}_{scale}"
-        )
-
-        # Add variation folder if there are multiple variations
-        if variation_name != "standard":
-            result_dir = result_dir / variation_name
-
-        result_dir.mkdir(parents=True, exist_ok=True)
+        task_id = task["task_id"]
+        result_dir = run_path / "results" / task_id
+        result_dir.mkdir(parents=True, exist_ok=False)
 
         # Save MIDI
         if midi_data is not None:
@@ -1026,7 +1019,7 @@ class Evaluator:
             dict: Summary with aggregated statistics
         """
         summary = {
-            "run_id": f"{config['timestamp']}_{config['run_name']}",
+            "run_id": config.get("run_id", f"{config['timestamp']}_{config['run_name']}"),
             "config": config,
             "totals": {
                 "total_generations": len(all_results),
@@ -1158,10 +1151,45 @@ class Evaluator:
         Returns:
             str: Sanitized filename
         """
-        # Replace spaces and special characters
-        safe = text.replace(" ", "_")
-        safe = "".join(c for c in safe if c.isalnum() or c in "_-")
-        return safe[:max_len]
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+        suffix = f"-{digest}"
+        if max_len <= len(suffix):
+            raise ValueError("max_len must leave room for a readable path component")
+
+        safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in text)
+        safe = safe.strip("._-") or "item"
+        readable_length = max_len - len(suffix)
+        safe = safe[:readable_length].rstrip("._-") or "item"
+        return f"{safe}{suffix}"
+
+    def _create_run_directory(self, run_name: str) -> tuple[Path, str, str]:
+        """Create a collision-resistant directory and return its authoritative metadata."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        run_id = f"{timestamp}_{self._sanitize_filename(run_name, max_len=32)}_{uuid4().hex[:16]}"
+        run_path = self.output_dir / run_id
+        run_path.mkdir(parents=True, exist_ok=False)
+        return run_path, run_id, timestamp
+
+    @staticmethod
+    def _task_fingerprint(task: dict) -> str:
+        """Return a stable digest for all task inputs that affect artifacts."""
+        task_inputs = {
+            key: task.get(key)
+            for key in (
+                "provider",
+                "model",
+                "original_prompt",
+                "full_prompt",
+                "root",
+                "scale",
+                "variation_name",
+                "use_thinking",
+                "effort",
+                "test_params",
+            )
+        }
+        canonical = json.dumps(task_inputs, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def main() -> None:
