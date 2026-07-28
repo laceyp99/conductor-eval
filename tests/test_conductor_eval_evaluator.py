@@ -608,6 +608,7 @@ def test_run_log_excludes_task_success_telemetry(monkeypatch, tmp_path):
         "use_thinking": False,
         "effort": None,
         "variation_name": "standard",
+        "task_id": "task-prompt-0123456789abcdef-1",
     }
     run_path = tmp_path / "run"
     run_path.mkdir()

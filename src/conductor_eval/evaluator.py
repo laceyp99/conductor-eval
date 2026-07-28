@@ -181,6 +181,14 @@ class Evaluator:
         logger.removeHandler(handler)
         handler.close()
 
+    @staticmethod
+    def _format_traceback(error: Exception) -> str:
+        """Return traceback locations without exception text or source content."""
+        return "\n".join(
+            f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}'
+            for frame in traceback.extract_tb(error.__traceback__)
+        )
+
     def evaluate(
         self,
         prompts: Union[str, list[str]],
@@ -285,7 +293,7 @@ class Evaluator:
                 "Evaluation failed: run_path=%s error_type=%s\nTraceback:\n%s",
                 run_path,
                 type(error).__name__,
-                "".join(traceback.format_tb(error.__traceback__)),
+                self._format_traceback(error),
             )
             raise
         finally:
@@ -987,7 +995,7 @@ class Evaluator:
                 scale,
                 task["variation_name"],
                 type(e).__name__,
-                "".join(traceback.format_tb(e.__traceback__)),
+                self._format_traceback(e),
             )
             result["error"] = str(e)
             result["tests"]["overall_pass"] = False
