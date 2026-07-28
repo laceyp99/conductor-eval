@@ -24,6 +24,24 @@ def test_harmonic_checks_are_available():
     } <= Evaluator.AVAILABLE_TESTS.keys()
 
 
+def test_ollama_discovery_returns_models(monkeypatch):
+    monkeypatch.setattr(
+        "conductor_eval.evaluator.ollama_api.get_model_list",
+        lambda: ["llama3.2", "qwen3"],
+    )
+
+    assert Evaluator._discover_ollama_models() == ["llama3.2", "qwen3"]
+
+
+def test_ollama_discovery_returns_empty_when_unavailable(monkeypatch):
+    def fail_discovery():
+        raise RuntimeError("Ollama is unavailable")
+
+    monkeypatch.setattr("conductor_eval.evaluator.ollama_api.get_model_list", fail_discovery)
+
+    assert Evaluator._discover_ollama_models() == []
+
+
 def test_evaluator_initialization_preserves_root_logging(tmp_path):
     root_logger = logging.getLogger()
     original_level = root_logger.level

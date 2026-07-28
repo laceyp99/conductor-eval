@@ -435,11 +435,7 @@ class Evaluator:
                         for model in self.model_info["models"][provider].keys():
                             resolved.append((provider, model))
                 # All Ollama models
-                try:
-                    for model in ollama_api.get_model_list():
-                        resolved.append(("Ollama", model))
-                except Exception:
-                    pass
+                resolved.extend(("Ollama", model) for model in self._discover_ollama_models())
 
             elif models_lower == "openai":
                 for model in self.model_info["models"]["OpenAI"].keys():
@@ -454,11 +450,7 @@ class Evaluator:
                     resolved.append(("Google", model))
 
             elif models_lower == "ollama":
-                try:
-                    for model in ollama_api.get_model_list():
-                        resolved.append(("Ollama", model))
-                except Exception:
-                    pass
+                resolved.extend(("Ollama", model) for model in self._discover_ollama_models())
 
             else:
                 # Assume it's a single model name
@@ -473,10 +465,16 @@ class Evaluator:
                 provider = self._get_provider(model)
                 if provider:
                     resolved.append((provider, model))
-                else:
-                    pass
 
         return resolved
+
+    @staticmethod
+    def _discover_ollama_models() -> list[str]:
+        """Return locally available Ollama models, or none when discovery is unavailable."""
+        try:
+            return list(ollama_api.get_model_list())
+        except Exception:
+            return []
 
     def _get_provider(self, model: str) -> str:
         """
@@ -494,12 +492,8 @@ class Evaluator:
                 if model in self.model_info["models"][provider]:
                     return provider
 
-        # Check Ollama
-        try:
-            if model in ollama_api.get_model_list():
-                return "Ollama"
-        except Exception:
-            pass
+        if model in self._discover_ollama_models():
+            return "Ollama"
 
         return None
 
