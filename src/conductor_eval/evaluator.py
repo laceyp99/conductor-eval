@@ -219,10 +219,8 @@ class Evaluator:
         # Resolve models to (provider, model) tuples
         resolved_models = self._resolve_models(models)
 
-        # Create a distinct run directory.
-        run_path = self._create_run_directory(run_name)
-        timestamp = "_".join(run_path.name.split("_", 3)[:3])
-        run_id = run_path.name
+        # Create a distinct run directory with metadata from one source of truth.
+        run_path, run_id, timestamp = self._create_run_directory(run_name)
 
         # Save configuration
         config = {
@@ -595,7 +593,10 @@ class Evaluator:
             fingerprint = self._task_fingerprint(task)
             occurrence = occurrences.get(fingerprint, 0) + 1
             occurrences[fingerprint] = occurrence
-            task["task_id"] = f"task-{fingerprint[:16]}-{occurrence}"
+            task["task_id"] = (
+                f"task-{self._sanitize_filename(task['original_prompt'], max_len=32)}-"
+                f"{fingerprint[:16]}-{occurrence}"
+            )
 
         return tasks
 
@@ -987,28 +988,9 @@ class Evaluator:
             run_path: Base path for this run
             task: Task dictionary with path info
         """
-        provider = task["provider"]
-        model = task["model"]
-        original_prompt = task["original_prompt"]
-        root = task["root"]
-        scale = task["scale"]
-        variation_name = task["variation_name"]
-
-        # Each user-controlled value is represented by one safe path component.
-        # The component hash preserves distinctions that sanitization or truncation
-        # would otherwise erase. A unique task directory is created atomically so
-        # concurrent results cannot overwrite one another.
-        result_parent = (
-            run_path
-            / "results"
-            / self._sanitize_filename(provider)
-            / self._sanitize_filename(model)
-            / self._sanitize_filename(original_prompt)
-            / f"{self._sanitize_filename(root)}_{self._sanitize_filename(scale)}"
-            / self._sanitize_filename(variation_name)
-        )
-        task_id = task.get("task_id") or f"task-{self._task_fingerprint(task)[:16]}"
-        result_dir = self._create_result_directory(result_parent, task_id)
+        task_id = task["task_id"]
+        result_dir = run_path / "results" / task_id
+        result_dir.mkdir(parents=True, exist_ok=False)
 
         # Save MIDI
         if midi_data is not None:
@@ -1180,13 +1162,13 @@ class Evaluator:
         safe = safe[:readable_length].rstrip("._-") or "item"
         return f"{safe}{suffix}"
 
-    def _create_run_directory(self, run_name: str) -> Path:
-        """Create a collision-resistant directory for one evaluation run."""
+    def _create_run_directory(self, run_name: str) -> tuple[Path, str, str]:
+        """Create a collision-resistant directory and return its authoritative metadata."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        run_id = f"{timestamp}_{self._sanitize_filename(run_name)}_{uuid4().hex}"
+        run_id = f"{timestamp}_{self._sanitize_filename(run_name, max_len=32)}_{uuid4().hex[:16]}"
         run_path = self.output_dir / run_id
-        run_path.mkdir(parents=True)
-        return run_path
+        run_path.mkdir(parents=True, exist_ok=False)
+        return run_path, run_id, timestamp
 
     @staticmethod
     def _task_fingerprint(task: dict) -> str:
@@ -1197,6 +1179,7 @@ class Evaluator:
                 "provider",
                 "model",
                 "original_prompt",
+                "full_prompt",
                 "root",
                 "scale",
                 "variation_name",
@@ -1207,20 +1190,6 @@ class Evaluator:
         }
         canonical = json.dumps(task_inputs, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _create_result_directory(result_parent: Path, task_id: str) -> Path:
-        """Atomically allocate a result directory without reusing existing artifacts."""
-        result_parent.mkdir(parents=True, exist_ok=True)
-        for attempt in range(1, 10_001):
-            suffix = "" if attempt == 1 else f"-{attempt}"
-            result_dir = result_parent / f"{task_id}{suffix}"
-            try:
-                result_dir.mkdir()
-            except FileExistsError:
-                continue
-            return result_dir
-        raise RuntimeError(f"Could not allocate a result directory below {result_parent}")
 
 
 def main() -> None:
