@@ -434,15 +434,9 @@ def load_run(run_path):
         with open(tr_path, "r", encoding="utf-8") as f:
             result = json.load(f)
 
-        # New reports persist variation with the result. Fall back to the legacy
-        # directory-depth convention so existing report layouts remain loadable.
+        # Result metadata is authoritative; task directory names have no semantics.
         cfg = result.get("config", {})
-        variation = cfg.get("variation_name")
-        rel = tr_path.relative_to(results_dir)
-        parts = rel.parts
-        if variation is None:
-            # e.g. ("Ollama", "model", "prompt_slug", "C_major", "low", "test_results.json")
-            variation = parts[-2] if len(parts) > 5 else "standard"
+        variation = cfg.get("variation_name", "unknown")
 
         tests = result.get("tests", {})
         metrics = result.get("metrics", {})
@@ -457,6 +451,7 @@ def load_run(run_path):
         chord_event_positions_test = tests.get("chord_event_positions", {})
 
         row = {
+            "task_id": result.get("task_id", ""),
             "model": result.get("model", "unknown"),
             "provider": result.get("provider", "unknown"),
             "prompt": result.get("prompt", ""),
