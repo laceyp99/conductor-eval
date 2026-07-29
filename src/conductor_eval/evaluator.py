@@ -164,6 +164,13 @@ class Evaluator:
             return bool(test_result.get("expected_positions"))
         return False
 
+    @staticmethod
+    def _is_overall_eligible(test_results: dict) -> bool:
+        """Return whether a result belongs in an overall pass-rate denominator."""
+        if "overall_status" in test_results:
+            return test_results["overall_status"] in {"passed", "failed"}
+        return "overall_pass" in test_results
+
     def __init__(
         self,
         output_dir: str | Path | None = None,
@@ -354,7 +361,7 @@ class Evaluator:
         results = {}
         all_passed = True
         substantive_checks = 0
-        test_failed = False
+        check_error_occurred = False
         test_params = self._validate_test_params(tests, test_params)
 
         for test_name in tests:
@@ -390,11 +397,11 @@ class Evaluator:
                     results[test_name] = {
                         "ran": False,
                         "eligible": False,
-                        "status": "failed",
+                        "status": "check_error",
                         "error": str(e),
                     }
                     all_passed = False
-                    test_failed = True
+                    check_error_occurred = True
 
             elif test_name == "duration":
                 explicit_params = test_params.get(test_name, {})
@@ -436,11 +443,11 @@ class Evaluator:
                         results[test_name] = {
                             "ran": False,
                             "eligible": False,
-                            "status": "failed",
+                            "status": "check_error",
                             "error": str(e),
                         }
                         all_passed = False
-                        test_failed = True
+                        check_error_occurred = True
 
             else:
                 detected_params = self._detect_test_params(prompt, test_name)
@@ -471,18 +478,20 @@ class Evaluator:
                     results[test_name] = {
                         "ran": False,
                         "eligible": False,
-                        "status": "failed",
+                        "status": "check_error",
                         "error": str(e),
                     }
                     all_passed = False
-                    test_failed = True
+                    check_error_occurred = True
 
         results["overall_pass"] = all_passed and substantive_checks > 0
         results["overall_status"] = (
-            "passed"
+            "check_error"
+            if check_error_occurred
+            else "passed"
             if results["overall_pass"]
             else "failed"
-            if test_failed or (substantive_checks > 0 and not all_passed)
+            if substantive_checks > 0 and not all_passed
             else "ineligible"
         )
         return results
@@ -869,7 +878,7 @@ class Evaluator:
                 new_table = Table(title=f"Evaluation Progress ({len(results)}/{total_tasks})")
                 new_table.add_column("Provider")
                 new_table.add_column("Model")
-                new_table.add_column("Tested")
+                new_table.add_column("Eligible")
                 new_table.add_column("Pass Rate")
                 new_table.add_column("Avg Latency")
                 new_table.add_column("Avg Cost")
@@ -881,7 +890,7 @@ class Evaluator:
                     s = stats.setdefault(
                         key,
                         {
-                            "tested": 0,
+                            "eligible": 0,
                             "passed": 0,
                             "latency_sum": 0.0,
                             "latency_count": 0,
@@ -889,8 +898,10 @@ class Evaluator:
                             "cost_count": 0,
                         },
                     )
-                    s["tested"] += 1
-                    if r.get("tests", {}).get("overall_pass", False):
+                    test_results = r.get("tests", {})
+                    if self._is_overall_eligible(test_results):
+                        s["eligible"] += 1
+                    if test_results.get("overall_pass", False):
                         s["passed"] += 1
                     latency = r.get("metrics", {}).get("api_latency")
                     if latency is not None:
@@ -902,7 +913,7 @@ class Evaluator:
                         s["cost_count"] += 1
 
                 for (provider, model), s in stats.items():
-                    pass_rate = (s["passed"] / s["tested"] * 100) if s["tested"] else 0
+                    pass_rate = s["passed"] / s["eligible"] * 100 if s["eligible"] else 0
                     avg_latency = (
                         s["latency_sum"] / s["latency_count"] if s["latency_count"] else None
                     )
@@ -910,7 +921,7 @@ class Evaluator:
                     new_table.add_row(
                         provider,
                         model,
-                        str(s["tested"]),
+                        str(s["eligible"]),
                         f"{pass_rate:.1f}%",
                         f"{avg_latency:.2f}s" if avg_latency is not None else "N/A",
                         f"${avg_cost:.4f}" if avg_cost is not None else "N/A",
@@ -958,7 +969,7 @@ class Evaluator:
                 # Update table
                 new_table = Table(title=f"Evaluation Progress ({len(results)}/{total_tasks})")
                 new_table.add_column("Model")
-                new_table.add_column("Tested")
+                new_table.add_column("Eligible")
                 new_table.add_column("Pass Rate")
                 new_table.add_column("Avg Latency")
 
@@ -969,14 +980,16 @@ class Evaluator:
                     s = stats.setdefault(
                         key,
                         {
-                            "tested": 0,
+                            "eligible": 0,
                             "passed": 0,
                             "latency_sum": 0.0,
                             "latency_count": 0,
                         },
                     )
-                    s["tested"] += 1
-                    if r.get("tests", {}).get("overall_pass", False):
+                    test_results = r.get("tests", {})
+                    if self._is_overall_eligible(test_results):
+                        s["eligible"] += 1
+                    if test_results.get("overall_pass", False):
                         s["passed"] += 1
                     latency = r.get("metrics", {}).get("api_latency")
                     if latency is not None:
@@ -984,13 +997,13 @@ class Evaluator:
                         s["latency_count"] += 1
 
                 for model, s in stats.items():
-                    pass_rate = (s["passed"] / s["tested"] * 100) if s["tested"] else 0
+                    pass_rate = s["passed"] / s["eligible"] * 100 if s["eligible"] else 0
                     avg_latency = (
                         s["latency_sum"] / s["latency_count"] if s["latency_count"] else None
                     )
                     new_table.add_row(
                         model,
-                        str(s["tested"]),
+                        str(s["eligible"]),
                         f"{pass_rate:.1f}%",
                         f"{avg_latency:.2f}s" if avg_latency is not None else "N/A",
                     )
@@ -1163,6 +1176,7 @@ class Evaluator:
                 "successful_generations": 0,
                 "failed_generations": 0,
                 "generation_error_generations": 0,
+                "check_error_generations": 0,
                 "validation_failed_generations": 0,
                 "ineligible_generations": 0,
                 "eligible_generations": 0,
@@ -1203,6 +1217,8 @@ class Evaluator:
                 summary["totals"]["validation_failed_generations"] += 1
             elif outcome == "ineligible":
                 summary["totals"]["ineligible_generations"] += 1
+            elif outcome == "check_error":
+                summary["totals"]["check_error_generations"] += 1
 
             if outcome == "passed":
                 summary["totals"]["overall_pass_count"] += 1
@@ -1232,6 +1248,7 @@ class Evaluator:
                     "passed": 0,
                     "failed": 0,
                     "generation_errors": 0,
+                    "check_errors": 0,
                     "validation_failed": 0,
                     "ineligible": 0,
                     "eligible": 0,
@@ -1254,6 +1271,8 @@ class Evaluator:
                 m["validation_failed"] += 1
             elif outcome == "ineligible":
                 m["ineligible"] += 1
+            elif outcome == "check_error":
+                m["check_errors"] += 1
             if outcome in {"passed", "failed"}:
                 m["eligible"] += 1
             if cost is None:
@@ -1273,6 +1292,7 @@ class Evaluator:
                     "passed": 0,
                     "validation_failed": 0,
                     "generation_errors": 0,
+                    "check_errors": 0,
                     "ineligible": 0,
                     "eligible": 0,
                 }
@@ -1283,8 +1303,10 @@ class Evaluator:
                 summary["by_root"][root]["validation_failed"] += 1
             elif outcome == "generation_error":
                 summary["by_root"][root]["generation_errors"] += 1
-            else:
+            elif outcome == "ineligible":
                 summary["by_root"][root]["ineligible"] += 1
+            elif outcome == "check_error":
+                summary["by_root"][root]["check_errors"] += 1
             if outcome in {"passed", "failed"}:
                 summary["by_root"][root]["eligible"] += 1
 
@@ -1296,6 +1318,7 @@ class Evaluator:
                     "passed": 0,
                     "validation_failed": 0,
                     "generation_errors": 0,
+                    "check_errors": 0,
                     "ineligible": 0,
                     "eligible": 0,
                 }
@@ -1306,8 +1329,10 @@ class Evaluator:
                 summary["by_scale"][scale]["validation_failed"] += 1
             elif outcome == "generation_error":
                 summary["by_scale"][scale]["generation_errors"] += 1
-            else:
+            elif outcome == "ineligible":
                 summary["by_scale"][scale]["ineligible"] += 1
+            elif outcome == "check_error":
+                summary["by_scale"][scale]["check_errors"] += 1
             if outcome in {"passed", "failed"}:
                 summary["by_scale"][scale]["eligible"] += 1
 

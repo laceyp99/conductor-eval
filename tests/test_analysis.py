@@ -290,6 +290,29 @@ def test_load_run_excludes_ineligible_results_from_overall_pass_rates(tmp_path):
     assert not build_pass_rate_by_model(df).data
 
 
+def test_load_run_excludes_check_errors_from_overall_pass_rates(tmp_path):
+    run_path = _write_run(
+        tmp_path,
+        {
+            "overall_status": "check_error",
+            "scale": {
+                "ran": False,
+                "eligible": False,
+                "status": "check_error",
+                "error": "checker failed",
+            },
+        },
+    )
+
+    df, _, _ = load_run(run_path)
+    row = df.iloc[0]
+
+    assert row["overall_status"] == "check_error"
+    assert row["overall_pass"] is None
+    assert not row["overall_eligible"]
+    assert not build_pass_rate_by_model(df).data
+
+
 def test_duration_adherence_groups_by_note_length_and_excludes_not_run_rows():
     df = pd.DataFrame(
         [

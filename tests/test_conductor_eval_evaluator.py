@@ -558,6 +558,81 @@ def test_run_tests_always_includes_scale_when_callers_omit_it(tmp_path):
     assert results["overall_status"] == "passed"
 
 
+def test_run_tests_classifies_checker_exceptions_as_ineligible_check_errors(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    def fail_scale_check(*args):
+        raise RuntimeError("checker failed")
+
+    monkeypatch.setattr(
+        evaluator,
+        "AVAILABLE_TESTS",
+        {**evaluator.AVAILABLE_TESTS, "scale": fail_scale_check},
+    )
+
+    results = evaluator.run_tests(
+        midi_data=MidiFile(ticks_per_beat=480),
+        root="C",
+        scale="major",
+        prompt="melody",
+        tests=["scale"],
+    )
+
+    assert results["scale"]["ran"] is False
+    assert results["scale"]["eligible"] is False
+    assert results["scale"]["status"] == "check_error"
+    assert results["overall_pass"] is False
+    assert results["overall_status"] == "check_error"
+
+
+@pytest.mark.parametrize(
+    ("test_results", "expected"),
+    [
+        ({"overall_pass": True, "overall_status": "passed"}, True),
+        ({"overall_pass": False, "overall_status": "failed"}, True),
+        ({"overall_pass": False, "overall_status": "ineligible"}, False),
+        ({"overall_pass": False, "overall_status": "generation_error"}, False),
+        ({"overall_pass": False, "overall_status": "check_error"}, False),
+        ({"overall_pass": False}, True),
+    ],
+)
+def test_overall_eligibility_contract_includes_only_valid_verdicts(test_results, expected):
+    assert Evaluator._is_overall_eligible(test_results) is expected
+
+
+def test_summary_separates_all_outcomes_and_excludes_noneligible_results(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    statuses = ["passed", "failed", "ineligible", "generation_error", "check_error"]
+    results = [
+        {
+            "model": "model",
+            "provider": "OpenAI",
+            "root": "C",
+            "scale": "major",
+            "metrics": {},
+            "tests": {
+                "overall_pass": status == "passed",
+                "overall_status": status,
+            },
+            "error": "generation failed" if status == "generation_error" else None,
+        }
+        for status in statuses
+    ]
+
+    summary = evaluator._generate_summary(results, {"run_id": "outcome-test"})
+
+    assert summary["totals"]["eligible_generations"] == 2
+    assert summary["totals"]["overall_pass_count"] == 1
+    assert summary["totals"]["validation_failed_generations"] == 1
+    assert summary["totals"]["ineligible_generations"] == 1
+    assert summary["totals"]["generation_error_generations"] == 1
+    assert summary["totals"]["check_error_generations"] == 1
+    assert summary["totals"]["overall_pass_rate"] == 0.5
+    assert summary["by_model"]["model"]["check_errors"] == 1
+    assert summary["by_root"]["C"]["check_errors"] == 1
+    assert summary["by_scale"]["major"]["check_errors"] == 1
+
+
 def test_generate_tasks_copies_test_params_to_each_task(tmp_path):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
     test_params = {"polyphony": {"min_voices": 3}}

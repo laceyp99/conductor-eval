@@ -2455,6 +2455,7 @@ def create_app(run_path):
         validation_failed = int((statuses == "failed").sum())
         ineligible = int((statuses == "ineligible").sum())
         failed_gen = int((statuses == "generation_error").sum())
+        check_errors = int((statuses == "check_error").sum())
         pass_rate = round(passed / len(eligible) * 100, 1) if len(eligible) > 0 else 0
         total_cost = filtered["cost"].sum()
         known_costs = int(filtered["cost"].notna().sum())
@@ -2483,7 +2484,9 @@ def create_app(run_path):
                             make_metric_card(
                                 "Pass Rate",
                                 f"{pass_rate}%",
-                                f"{passed} passed / {validation_failed} failed / {ineligible} ineligible / {failed_gen} errors",
+                                f"{passed} passed / {validation_failed} failed / "
+                                f"{ineligible} ineligible / {failed_gen} generation errors / "
+                                f"{check_errors} check errors",
                                 color="#2ecc71" if pass_rate >= 50 else "#e74c3c",
                             ),
                             md=2,
@@ -2897,6 +2900,7 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
     validation_failed = int((statuses == "failed").sum())
     ineligible = int((statuses == "ineligible").sum())
     generation_errors = int((statuses == "generation_error").sum())
+    check_errors = int((statuses == "check_error").sum())
     pass_rate = round(passed / len(eligible) * 100, 1) if len(eligible) > 0 else 0
     total_reported_cost = df["cost"].sum()
     known_costs = int(df["cost"].notna().sum())
@@ -2932,7 +2936,7 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
     <div class="stats">
         <div class="stat-card"><div class="label">Total</div><div class="value">{total}</div></div>
         <div class="stat-card"><div class="label">Pass Rate</div><div class="value" style="color: {"#2ecc71" if pass_rate >= 50 else "#e74c3c"}">{pass_rate}%</div><div class="label">{passed}/{len(eligible)} eligible</div></div>
-        <div class="stat-card"><div class="label">Outcomes</div><div class="value">{passed} / {validation_failed}</div><div class="label">passed / failed</div><div class="label">{ineligible} ineligible / {generation_errors} errors</div></div>
+        <div class="stat-card"><div class="label">Outcomes</div><div class="value">{passed} / {validation_failed}</div><div class="label">passed / failed</div><div class="label">{ineligible} ineligible / {generation_errors} generation errors / {check_errors} check errors</div></div>
         <div class="stat-card"><div class="label">Total Reported Cost</div><div class="value">${total_reported_cost:.4f}</div><div class="label">{known_costs}/{total} costs reported</div></div>
     </div>
     {"".join(chart_divs)}

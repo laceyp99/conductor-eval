@@ -305,6 +305,7 @@ Aggregated statistics for the entire run:
         "successful_generations": 45,
         "failed_generations": 3,
         "generation_error_generations": 3,
+        "check_error_generations": 0,
         "validation_failed_generations": 6,
         "ineligible_generations": 3,
         "eligible_generations": 42,
@@ -378,8 +379,10 @@ Individual results for each generation:
 ```
 
 Overall pass rates use only eligible results as their denominator. Each result persists
-an `overall_status` of `passed`, `failed`, `ineligible`, or `generation_error`; a check
-with no examined notes is ineligible and can never make `overall_pass` true.
+an `overall_status` of `passed`, `failed`, `ineligible`, `generation_error`, or
+`check_error`. A check with no examined notes is ineligible and can never make
+`overall_pass` true. A checker exception is a `check_error`, is excluded from pass-rate
+denominators, and is reported separately from a musical validation failure.
 
 
 ## Analysis
