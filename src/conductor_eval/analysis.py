@@ -510,11 +510,13 @@ def load_run(run_path):
             "duration_param": duration_test.get("params", {}).get("duration", ""),
             # Texture tests
             "monophony_ran": monophony_test.get("ran", False),
+            "monophony_eligible": monophony_test.get("eligible", monophony_test.get("ran", False)),
             "monophony_pass": monophony_test.get("passed", False),
             "monophony_max_polyphony": monophony_test.get("max_polyphony", 0),
             "monophony_distribution": monophony_test.get("polyphony_distribution", {}),
             "monophony_percentages": monophony_test.get("polyphony_percentages", {}),
             "polyphony_ran": polyphony_test.get("ran", False),
+            "polyphony_eligible": polyphony_test.get("eligible", polyphony_test.get("ran", False)),
             "polyphony_pass": polyphony_test.get("passed", False),
             "polyphony_max_polyphony": polyphony_test.get("max_polyphony", 0),
             "polyphony_min_voices": polyphony_test.get("params", {}).get(
@@ -866,12 +868,18 @@ def build_duration_adherence_by_model(df):
 def build_texture_performance_by_model(df):
     """Build monophony and polyphony pass rates from eligible generations."""
     title = "Texture Performance by Model"
-    if not (df["monophony_ran"].any() or df["polyphony_ran"].any()):
+    monophony_eligible = (
+        df["monophony_eligible"] if "monophony_eligible" in df else df["monophony_ran"]
+    )
+    polyphony_eligible = (
+        df["polyphony_eligible"] if "polyphony_eligible" in df else df["polyphony_ran"]
+    )
+    if not (monophony_eligible.any() or polyphony_eligible.any()):
         return _empty_performance_figure(title, "No texture checks ran")
 
     fig = go.Figure()
-    _add_check_pass_rate_trace(fig, df[df["monophony_ran"]], "monophony_pass", "Monophony")
-    _add_check_pass_rate_trace(fig, df[df["polyphony_ran"]], "polyphony_pass", "Polyphony")
+    _add_check_pass_rate_trace(fig, df[monophony_eligible], "monophony_pass", "Monophony")
+    _add_check_pass_rate_trace(fig, df[polyphony_eligible], "polyphony_pass", "Polyphony")
     return _finish_check_pass_rate_figure(fig, title)
 
 

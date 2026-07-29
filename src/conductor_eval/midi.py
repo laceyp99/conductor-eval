@@ -135,6 +135,7 @@ def calculate_polyphony_profile(midi: MidiFile) -> dict:
         if total_duration_ticks > 0
     }
     return {
+        "total_notes": len(intervals),
         "polyphony_distribution": distribution,
         "polyphony_percentages": percentages,
         "max_polyphony": max_polyphony,

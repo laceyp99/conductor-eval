@@ -250,6 +250,26 @@ def test_load_run_treats_missing_and_not_run_checks_as_ineligible(tmp_path):
     assert row["duration_pass"]
 
 
+def test_texture_performance_excludes_checks_without_completed_note_evidence():
+    df = pd.DataFrame(
+        [
+            {
+                "model": "model",
+                "monophony_ran": True,
+                "monophony_eligible": False,
+                "monophony_pass": False,
+                "polyphony_ran": False,
+                "polyphony_eligible": False,
+                "polyphony_pass": False,
+            }
+        ]
+    )
+
+    figure = build_texture_performance_by_model(df)
+
+    assert not figure.data
+
+
 def test_load_run_excludes_ineligible_results_from_overall_pass_rates(tmp_path):
     run_path = _write_run(
         tmp_path,

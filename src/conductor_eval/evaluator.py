@@ -149,6 +149,21 @@ class Evaluator:
             return list(tests)
         return ["scale", *tests]
 
+    @staticmethod
+    def _has_substantive_evidence(test_name: str, test_result: dict) -> bool:
+        """Return whether a completed check examined enough evidence to be eligible."""
+        if test_name in {"scale", "duration"}:
+            return test_result.get("total", 0) > 0
+        if test_name in {"monophony", "polyphony"}:
+            return test_result.get("total_notes", 0) > 0
+        if test_name == "chord_progression":
+            return bool(test_result.get("bars"))
+        if test_name == "harmonic_rhythm":
+            return bool(test_result.get("expected_onsets"))
+        if test_name == "chord_event_positions":
+            return bool(test_result.get("expected_positions"))
+        return False
+
     def __init__(
         self,
         output_dir: str | Path | None = None,
@@ -354,7 +369,7 @@ class Evaluator:
                 try:
                     test_result = test_func(midi_data, root, scale)
                     test_result["ran"] = True
-                    test_result["eligible"] = test_result.get("total", 0) > 0
+                    test_result["eligible"] = self._has_substantive_evidence(test_name, test_result)
                     test_result["passed"] = (
                         test_result["eligible"] and test_result.get("incorrect", 0) == 0
                     )
@@ -397,7 +412,9 @@ class Evaluator:
                         duration_value = resolved_params["duration"]
                         test_result = test_func(midi_data, duration_value)
                         test_result["ran"] = True
-                        test_result["eligible"] = test_result.get("total", 0) > 0
+                        test_result["eligible"] = self._has_substantive_evidence(
+                            test_name, test_result
+                        )
                         test_result["passed"] = (
                             test_result["eligible"] and test_result.get("incorrect", 0) == 0
                         )
@@ -433,16 +450,22 @@ class Evaluator:
                 try:
                     test_result = test_func(midi_data, **resolved_params)
                     test_result["ran"] = True
-                    test_result["eligible"] = True
+                    test_result["eligible"] = self._has_substantive_evidence(test_name, test_result)
+                    test_result["passed"] = test_result["eligible"] and test_result.get(
+                        "passed", test_result.get("incorrect", 0) == 0
+                    )
                     test_result["status"] = (
                         "passed"
-                        if test_result.get("passed", test_result.get("incorrect", 0) == 0)
+                        if test_result["passed"]
                         else "failed"
+                        if test_result["eligible"]
+                        else "ineligible"
                     )
                     test_result["params"] = resolved_params
                     results[test_name] = test_result
-                    substantive_checks += 1
-                    if not test_result.get("passed", test_result.get("incorrect", 0) == 0):
+                    if test_result["eligible"]:
+                        substantive_checks += 1
+                    if test_result["eligible"] and not test_result["passed"]:
                         all_passed = False
                 except Exception as e:
                     results[test_name] = {

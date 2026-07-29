@@ -500,6 +500,26 @@ def test_run_tests_marks_empty_midi_ineligible_under_default_checks(tmp_path):
     assert results["overall_status"] == "ineligible"
 
 
+@pytest.mark.parametrize("texture_test", ["monophony", "polyphony"])
+def test_run_tests_requires_completed_notes_for_texture_evidence(tmp_path, texture_test):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    results = evaluator.run_tests(
+        midi_data=MidiFile(ticks_per_beat=480),
+        root="C",
+        scale="major",
+        prompt="empty texture",
+        tests=[texture_test],
+    )
+
+    assert results["scale"]["status"] == "ineligible"
+    assert results[texture_test]["total_notes"] == 0
+    assert results[texture_test]["eligible"] is False
+    assert results[texture_test]["status"] == "ineligible"
+    assert results["overall_pass"] is False
+    assert results["overall_status"] == "ineligible"
+
+
 def test_run_tests_marks_skipped_only_selection_ineligible(tmp_path):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
 
