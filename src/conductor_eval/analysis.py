@@ -446,19 +446,11 @@ def load_run(run_path):
         with open(tr_path, "r", encoding="utf-8") as f:
             result = json.load(f)
 
-        # Determine variation from directory structure
-        rel = tr_path.relative_to(results_dir)
-        parts = (
-            rel.parts
-        )  # e.g. ("Ollama", "model", "prompt_slug", "C_major", "low", "test_results.json")
-        # If there's a subfolder beyond root_scale (5+ parts before the filename), it's a variation
-        if len(parts) > 5:
-            variation = parts[-2]
-        else:
-            variation = "standard"
+        # Result metadata is authoritative; task directory names have no semantics.
+        cfg = result.get("config", {})
+        variation = cfg.get("variation_name", "unknown")
 
         tests = result.get("tests", {})
-        cfg = result.get("config", {})
         metrics = result.get("metrics", {})
 
         # Scale test details
@@ -478,6 +470,7 @@ def load_run(run_path):
         )
 
         row = {
+            "task_id": result.get("task_id", ""),
             "model": result.get("model", "unknown"),
             "provider": result.get("provider", "unknown"),
             "prompt": result.get("prompt", ""),

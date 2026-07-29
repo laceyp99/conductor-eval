@@ -1,10 +1,14 @@
 import json
+import logging
+import threading
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 from conductor_core import GenerationRequest
 from mido import Message, MidiFile
 
+import conductor_eval.evaluator as evaluator_module
 from conductor_eval import EvalEngineAdapter, Evaluator
 
 
@@ -18,6 +22,198 @@ def test_harmonic_checks_are_available():
         "harmonic_rhythm",
         "chord_event_positions",
     } <= Evaluator.AVAILABLE_TESTS.keys()
+
+
+def test_ollama_discovery_returns_models(monkeypatch):
+    monkeypatch.setattr(
+        "conductor_eval.evaluator.ollama_api.get_model_list",
+        lambda: ["llama3.2", "qwen3"],
+    )
+
+    assert Evaluator._discover_ollama_models() == ["llama3.2", "qwen3"]
+
+
+def test_ollama_discovery_returns_empty_when_unavailable(monkeypatch):
+    def fail_discovery():
+        raise RuntimeError("Ollama is unavailable")
+
+    monkeypatch.setattr("conductor_eval.evaluator.ollama_api.get_model_list", fail_discovery)
+
+    assert Evaluator._discover_ollama_models() == []
+
+
+def test_evaluator_initialization_preserves_root_logging(tmp_path):
+    root_logger = logging.getLogger()
+    original_level = root_logger.level
+    original_handlers = tuple(root_logger.handlers)
+    sentinel = logging.NullHandler()
+    root_logger.addHandler(sentinel)
+
+    try:
+        output_dir = tmp_path / "evaluations"
+        Evaluator(output_dir=output_dir)
+
+        assert root_logger.level == original_level
+        assert tuple(root_logger.handlers) == (*original_handlers, sentinel)
+        assert not output_dir.exists()
+    finally:
+        root_logger.removeHandler(sentinel)
+
+
+def test_successful_evaluation_log_is_minimal(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    evaluator.evaluate(
+        prompts="warm loop",
+        roots=["C"],
+        models=[],
+        run_name="minimal",
+    )
+
+    run_path = next((tmp_path / "evaluations").iterdir())
+    log_contents = (run_path / "run.log").read_text(encoding="utf-8")
+
+    assert "Starting evaluation 'minimal' with 0 total tasks" in log_contents
+    assert "Evaluation complete. Results saved to" in log_contents
+    assert "Generation completed" not in log_contents
+    assert "Checks completed" not in log_contents
+    assert "Saved result artifacts" not in log_contents
+
+
+def test_evaluations_keep_logs_and_artifacts_isolated_when_overlapping(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    resolution_barrier = threading.Barrier(2)
+    task_barrier = threading.Barrier(2)
+    errors = []
+    run_uuids = iter(["a" * 32, "b" * 32])
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 26, 12, 34, 56, 789012, tzinfo=tz)
+
+    def resolve_models(models, logger):
+        resolution_barrier.wait(timeout=5)
+        marker = threading.current_thread().name
+        logger.info("Resolving models for %s", marker)
+        return [("Ollama", marker)]
+
+    def generate_tasks(**kwargs):
+        marker = kwargs["resolved_models"][0][1]
+        return [{"provider": "Ollama", "model": marker, "marker": marker}]
+
+    def run_single(task, run_path, tests_to_run, logger):
+        task_barrier.wait(timeout=5)
+        logger.info("Running task marker=%s", task["marker"])
+        return {
+            "provider": task["provider"],
+            "model": task["model"],
+            "root": "C",
+            "scale": "major",
+            "metrics": {
+                "api_latency": 1.0,
+                "attempt_latency": 1.0,
+                "cost": 0.0,
+            },
+            "tests": {"overall_pass": True},
+            "error": None,
+        }
+
+    monkeypatch.setattr("conductor_eval.evaluator.datetime", FixedDatetime)
+    monkeypatch.setattr(
+        "conductor_eval.evaluator.uuid4",
+        lambda: SimpleNamespace(hex=next(run_uuids)),
+    )
+    monkeypatch.setattr(evaluator, "_resolve_models", resolve_models)
+    monkeypatch.setattr(evaluator, "_generate_tasks", generate_tasks)
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
+
+    def run_evaluation():
+        try:
+            evaluator.evaluate(
+                prompts="warm loop",
+                roots=["C"],
+                models="none",
+                run_name="same-name",
+            )
+        except Exception as error:
+            errors.append(error)
+
+    threads = [
+        threading.Thread(
+            target=run_evaluation,
+            name=f"evaluation-{index}",
+        )
+        for index in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+    assert not errors
+
+    run_paths = list((tmp_path / "evaluations").iterdir())
+    assert len(run_paths) == 2
+    assert len({path.name for path in run_paths}) == 2
+    assert all(path.name.startswith("20260726_123456_789012_same-name-") for path in run_paths)
+
+    for run_path in run_paths:
+        log_contents = (run_path / "run.log").read_text(encoding="utf-8")
+        config = json.loads((run_path / "config.json").read_text(encoding="utf-8"))
+        summary = json.loads((run_path / "summary.json").read_text(encoding="utf-8"))
+        other_paths = [path for path in run_paths if path != run_path]
+        marker = config["models"][0][1]
+        other_marker = next(
+            json.loads((path / "config.json").read_text(encoding="utf-8"))["models"][0][1]
+            for path in other_paths
+        )
+        assert config["run_id"] == run_path.name
+        assert summary["run_id"] == run_path.name
+        assert "Starting evaluation 'same-name'" in log_contents
+        assert f"Running task marker={marker}" in log_contents
+        assert f"Running task marker={other_marker}" not in log_contents
+        assert str(run_path) in log_contents
+        assert all(str(other_path) not in log_contents for other_path in other_paths)
+
+
+def test_failed_evaluation_retains_and_closes_its_run_log(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    created_logger = None
+    created_handler = None
+    create_run_logger = evaluator._create_run_logger
+
+    def fail_resolution(models, logger):
+        raise RuntimeError("model resolution failed")
+
+    def track_run_logger(run_path, run_id):
+        nonlocal created_logger, created_handler
+        created_logger, created_handler = create_run_logger(run_path, run_id)
+        return created_logger, created_handler
+
+    monkeypatch.setattr(evaluator, "_resolve_models", fail_resolution)
+    monkeypatch.setattr(evaluator, "_create_run_logger", track_run_logger)
+
+    with pytest.raises(RuntimeError, match="model resolution failed"):
+        evaluator.evaluate(
+            prompts="warm loop",
+            roots=["C"],
+            models="none",
+            run_name="failure",
+        )
+
+    run_path = next((tmp_path / "evaluations").iterdir())
+    log_contents = (run_path / "run.log").read_text(encoding="utf-8")
+
+    assert "Evaluation failed: run_path=" in log_contents
+    assert "error_type=RuntimeError" in log_contents
+    assert "Traceback:" in log_contents
+    assert "model resolution failed" not in log_contents
+    assert created_logger is not None
+    assert created_handler is not None
+    assert created_logger.name not in logging.Logger.manager.loggerDict
+    assert not created_logger.handlers
+    assert created_handler.stream is None
 
 
 class RecordingEngine:
@@ -69,7 +265,7 @@ def test_eval_engine_adapter_delegates_generation_to_core(tmp_path):
     ]
 
 
-def test_save_results_uses_per_result_loop_filename(tmp_path):
+def test_save_results_uses_unique_safe_task_directory(tmp_path):
     evaluator = Evaluator(output_dir=str(tmp_path / "evaluations"))
     run_path = tmp_path / "run"
     midi = MidiFile()
@@ -86,15 +282,105 @@ def test_save_results_uses_per_result_loop_filename(tmp_path):
         "root": "C",
         "scale": "major",
         "variation_name": "standard",
+        "task_id": "task-warm_loop-0123456789abcdef-1",
     }
 
     evaluator._save_results(result, midi, messages, run_path, task)
 
-    result_dir = run_path / "results" / "OpenAI" / "gpt-test" / "warm_loop" / "C_major"
+    result_dir = run_path / "results" / task["task_id"]
     assert (result_dir / "loop.mid").exists()
     legacy_filename = "output" + ".mid"
     assert not (result_dir / legacy_filename).exists()
     assert json.loads((result_dir / "messages.json").read_text(encoding="utf-8")) == messages
+
+
+def test_create_run_directory_returns_compact_authoritative_metadata(tmp_path, monkeypatch):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    frozen_time = datetime(2026, 7, 28, 12, 34, 56, 789012)
+    monkeypatch.setattr(evaluator_module, "datetime", SimpleNamespace(now=lambda: frozen_time))
+    monkeypatch.setattr(
+        evaluator_module,
+        "uuid4",
+        lambda: SimpleNamespace(hex="0123456789abcdef" * 2),
+    )
+
+    run_path, run_id, timestamp = evaluator._create_run_directory("same name")
+
+    assert timestamp == "20260728_123456_789012"
+    assert run_id == "20260728_123456_789012_same_name-f03c3f373761_0123456789abcdef"
+    assert run_path.name == run_id
+    assert run_path.is_dir()
+
+
+def test_create_run_directory_fails_for_exact_collision(tmp_path, monkeypatch):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    monkeypatch.setattr(
+        evaluator_module,
+        "datetime",
+        SimpleNamespace(now=lambda: datetime(2026, 7, 28, 12, 34, 56, 789012)),
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "uuid4",
+        lambda: SimpleNamespace(hex="0123456789abcdef" * 2),
+    )
+
+    evaluator._create_run_directory("same name")
+
+    with pytest.raises(FileExistsError):
+        evaluator._create_run_directory("same name")
+
+
+def test_generate_tasks_uses_distinct_ids_for_normalization_collisions(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    tasks = evaluator._generate_tasks(
+        prompts=["warm/loop", "warm_loop"],
+        roots=["C"],
+        resolved_models=[("OpenAI", "gpt-test")],
+        tests=["scale"],
+        test_reasoning=False,
+    )
+
+    assert len({task["task_id"] for task in tasks}) == len(tasks)
+    assert all(task["task_id"].startswith("task-warm_loop-") for task in tasks)
+    assert all(len(task["task_id"].split("-")[-2]) == 16 for task in tasks)
+
+
+def test_generate_tasks_qualifies_repeated_identical_tasks_with_occurrences(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    tasks = evaluator._generate_tasks(
+        prompts=["same prompt"] * 3,
+        roots=["C"],
+        resolved_models=[("OpenAI", "gpt-test")],
+        tests=["scale"],
+        test_reasoning=False,
+    )
+
+    major_ids = [task["task_id"] for task in tasks if task["scale"] == "major"]
+    assert [task_id.rsplit("-", 1)[-1] for task_id in major_ids] == ["1", "2", "3"]
+
+
+def test_save_results_uses_compact_task_directory_and_fails_on_collision(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    run_path = tmp_path / "run"
+    task = {
+        "provider": "OpenAI",
+        "model": "org/model:v1",
+        "original_prompt": "x" * 500,
+        "root": "C",
+        "scale": "major",
+        "variation_name": "standard",
+        "task_id": "task-" + ("x" * 18) + "-0123456789abcdef-1",
+    }
+
+    evaluator._save_results({"task_id": task["task_id"]}, None, [], run_path, task)
+
+    result_dir = run_path / "results" / task["task_id"]
+    assert (result_dir / "test_results.json").exists()
+    assert len(str(result_dir.relative_to(run_path))) < 100
+
+    with pytest.raises(FileExistsError):
+        evaluator._save_results({"task_id": task["task_id"]}, None, [], run_path, task)
 
 
 def test_run_tests_routes_polyphony_params_and_updates_overall_pass(tmp_path):
@@ -306,9 +592,14 @@ def test_summary_preserves_unknown_costs_and_excludes_failed_latency(tmp_path):
                 "error": "timed out",
             },
         ],
-        {"timestamp": "20260723_000000", "run_name": "metric-contract"},
+        {
+            "run_id": "20260723_000000_metric-contract_abc123",
+            "timestamp": "20260723_000000",
+            "run_name": "metric-contract",
+        },
     )
 
+    assert summary["run_id"] == "20260723_000000_metric-contract_abc123"
     assert summary["totals"]["total_cost"] == 0.25
     assert summary["totals"]["known_cost_generations"] == 1
     assert summary["totals"]["unknown_cost_generations"] == 1
@@ -317,59 +608,7 @@ def test_summary_preserves_unknown_costs_and_excludes_failed_latency(tmp_path):
     assert summary["by_model"]["unknown"]["avg_latency"] is None
 
 
-def test_summary_separates_eligible_ineligible_and_generation_errors(tmp_path):
-    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
-    summary = evaluator._generate_summary(
-        [
-            {
-                "model": "model",
-                "provider": "OpenAI",
-                "root": "C",
-                "scale": "major",
-                "metrics": {},
-                "tests": {"overall_pass": True, "overall_status": "passed"},
-                "error": None,
-            },
-            {
-                "model": "model",
-                "provider": "OpenAI",
-                "root": "C",
-                "scale": "major",
-                "metrics": {},
-                "tests": {"overall_pass": False, "overall_status": "failed"},
-                "error": None,
-            },
-            {
-                "model": "model",
-                "provider": "OpenAI",
-                "root": "C",
-                "scale": "major",
-                "metrics": {},
-                "tests": {"overall_pass": False, "overall_status": "ineligible"},
-                "error": None,
-            },
-            {
-                "model": "model",
-                "provider": "OpenAI",
-                "root": "C",
-                "scale": "major",
-                "metrics": {},
-                "tests": {"overall_pass": False, "overall_status": "generation_error"},
-                "error": "timed out",
-            },
-        ],
-        {"timestamp": "20260723_000000", "run_name": "outcomes"},
-    )
-
-    assert summary["totals"]["eligible_generations"] == 2
-    assert summary["totals"]["overall_pass_count"] == 1
-    assert summary["totals"]["validation_failed_generations"] == 1
-    assert summary["totals"]["ineligible_generations"] == 1
-    assert summary["totals"]["generation_error_generations"] == 1
-    assert summary["totals"]["overall_pass_rate"] == 0.5
-
-
-def test_failed_generation_records_attempt_latency(monkeypatch, tmp_path):
+def test_failed_generation_records_attempt_latency_and_contextual_log(monkeypatch, tmp_path):
     class FailingAdapter:
         def __init__(self, output_dir):
             self.output_dir = output_dir
@@ -384,16 +623,23 @@ def test_failed_generation_records_attempt_latency(monkeypatch, tmp_path):
     task = {
         "provider": "OpenAI",
         "model": "test-model",
-        "full_prompt": "prompt",
-        "original_prompt": "prompt",
+        "full_prompt": "sensitive prompt",
+        "original_prompt": "sensitive prompt",
         "root": "C",
         "scale": "major",
         "use_thinking": False,
         "effort": None,
         "variation_name": "standard",
+        "task_id": "task-prompt-0123456789abcdef-1",
     }
 
-    result = evaluator._run_single(task, tmp_path / "run", ["scale"])
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+    logger, handler = evaluator._create_run_logger(run_path, "failure")
+    try:
+        result = evaluator._run_single(task, run_path, ["scale"], logger)
+    finally:
+        evaluator._close_run_logger(logger, handler)
 
     assert result["error"] == "provider timed out"
     assert result["metrics"] == {
@@ -402,3 +648,52 @@ def test_failed_generation_records_attempt_latency(monkeypatch, tmp_path):
         "cost": None,
         "cost_available": False,
     }
+    log_contents = (run_path / "run.log").read_text(encoding="utf-8")
+    assert "Task failed: task_id=task-prompt-0123456789abcdef-1" in log_contents
+    assert "provider=OpenAI model=test-model root=C scale=major variation=standard" in log_contents
+    assert "error_type=RuntimeError" in log_contents
+    assert "Traceback:" in log_contents
+    assert "sensitive prompt" not in log_contents
+
+
+def test_run_log_excludes_task_success_telemetry(monkeypatch, tmp_path):
+    class SuccessfulAdapter:
+        def __init__(self, output_dir):
+            self.output_dir = output_dir
+
+        def generate(self, **kwargs):
+            return MidiFile(), [{"role": "assistant", "content": "loop"}], 0.125
+
+    monkeypatch.setattr("conductor_eval.evaluator.EvalEngineAdapter", SuccessfulAdapter)
+    monkeypatch.setattr("conductor_eval.evaluator.time.perf_counter", lambda: next(clock))
+    clock = iter([100.0, 101.25])
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    monkeypatch.setattr(
+        evaluator,
+        "run_tests",
+        lambda **kwargs: {"scale": {"passed": True}, "overall_pass": True},
+    )
+    task = {
+        "provider": "OpenAI",
+        "model": "test-model",
+        "full_prompt": "prompt",
+        "original_prompt": "prompt",
+        "root": "C",
+        "scale": "major",
+        "use_thinking": False,
+        "effort": None,
+        "variation_name": "standard",
+        "task_id": "task-prompt-0123456789abcdef-1",
+    }
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+    logger, handler = evaluator._create_run_logger(run_path, "lifecycle")
+
+    try:
+        result = evaluator._run_single(task, run_path, ["scale"], logger)
+    finally:
+        evaluator._close_run_logger(logger, handler)
+
+    log_contents = (run_path / "run.log").read_text(encoding="utf-8")
+    assert result["metrics"]["api_latency"] == 1.25
+    assert log_contents == ""

@@ -11,7 +11,6 @@ def test_public_package_exports_evaluator_api():
 
 def test_evaluator_default_output_uses_eval_data_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("CONDUCTOR_EVAL_HOME", str(tmp_path / "eval-home"))
-    monkeypatch.setattr(Evaluator, "_setup_logging", lambda self: None)
 
     evaluator = Evaluator()
 
