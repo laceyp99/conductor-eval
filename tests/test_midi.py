@@ -90,4 +90,5 @@ def test_calculate_polyphony_profile_merges_tracks():
     assert profile["max_polyphony"] == 2
     assert profile["polyphony_distribution"] == {1: 1.0, 2: 0.5}
     assert profile["polyphony_percentages"] == {1: 66.67, 2: 33.33}
+    assert profile["total_notes"] == 2
     assert profile["total_duration"] == 1.5

@@ -481,6 +481,180 @@ def test_run_tests_keeps_duration_prompt_detection_as_fallback(tmp_path):
     assert results["duration"]["detected_from_prompt"] is True
 
 
+def test_run_tests_marks_empty_midi_ineligible_under_default_checks(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    results = evaluator.run_tests(
+        midi_data=MidiFile(ticks_per_beat=480),
+        root="C",
+        scale="major",
+        prompt="use quarter notes",
+        tests=["scale", "duration"],
+    )
+
+    assert results["scale"]["total"] == 0
+    assert results["scale"]["status"] == "ineligible"
+    assert results["duration"]["total"] == 0
+    assert results["duration"]["status"] == "ineligible"
+    assert results["overall_pass"] is False
+    assert results["overall_status"] == "ineligible"
+
+
+def test_run_tests_marks_dangling_note_ineligible_under_default_checks(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    midi = MidiFile(ticks_per_beat=480)
+    track = midi.add_track()
+    track.append(Message("note_on", note=60, velocity=80, time=0))
+
+    results = evaluator.run_tests(
+        midi_data=midi,
+        root="C",
+        scale="major",
+        prompt="use quarter notes",
+        tests=["scale", "duration"],
+    )
+
+    assert results["scale"]["total"] == 0
+    assert results["scale"]["status"] == "ineligible"
+    assert results["duration"]["total"] == 0
+    assert results["duration"]["status"] == "ineligible"
+    assert results["overall_pass"] is False
+    assert results["overall_status"] == "ineligible"
+
+
+@pytest.mark.parametrize("texture_test", ["monophony", "polyphony"])
+def test_run_tests_requires_completed_notes_for_texture_evidence(tmp_path, texture_test):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    results = evaluator.run_tests(
+        midi_data=MidiFile(ticks_per_beat=480),
+        root="C",
+        scale="major",
+        prompt="empty texture",
+        tests=[texture_test],
+    )
+
+    assert results["scale"]["status"] == "ineligible"
+    assert results[texture_test]["total_notes"] == 0
+    assert results[texture_test]["eligible"] is False
+    assert results[texture_test]["status"] == "ineligible"
+    assert results["overall_pass"] is False
+    assert results["overall_status"] == "ineligible"
+
+
+def test_run_tests_marks_skipped_only_selection_ineligible(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    results = evaluator.run_tests(
+        midi_data=MidiFile(ticks_per_beat=480),
+        root="C",
+        scale="major",
+        prompt="melody",
+        tests=["duration"],
+    )
+
+    assert results["scale"]["status"] == "ineligible"
+    assert results["duration"]["status"] == "ineligible"
+    assert results["overall_pass"] is False
+    assert results["overall_status"] == "ineligible"
+
+
+def test_run_tests_always_includes_scale_when_callers_omit_it(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    midi = MidiFile(ticks_per_beat=480)
+    track = midi.add_track()
+    track.append(Message("note_on", note=60, velocity=80, time=0))
+    track.append(Message("note_off", note=60, velocity=0, time=480))
+
+    results = evaluator.run_tests(
+        midi_data=midi,
+        root="C",
+        scale="major",
+        prompt="melody",
+        tests=["duration"],
+    )
+
+    assert results["scale"]["passed"] is True
+    assert results["duration"]["status"] == "ineligible"
+    assert results["overall_pass"] is True
+    assert results["overall_status"] == "passed"
+
+
+def test_run_tests_classifies_checker_exceptions_as_ineligible_check_errors(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    def fail_scale_check(*args):
+        raise RuntimeError("checker failed")
+
+    monkeypatch.setattr(
+        evaluator,
+        "AVAILABLE_TESTS",
+        {**evaluator.AVAILABLE_TESTS, "scale": fail_scale_check},
+    )
+
+    results = evaluator.run_tests(
+        midi_data=MidiFile(ticks_per_beat=480),
+        root="C",
+        scale="major",
+        prompt="melody",
+        tests=["scale"],
+    )
+
+    assert results["scale"]["ran"] is False
+    assert results["scale"]["eligible"] is False
+    assert results["scale"]["status"] == "check_error"
+    assert results["overall_pass"] is False
+    assert results["overall_status"] == "check_error"
+
+
+@pytest.mark.parametrize(
+    ("test_results", "expected"),
+    [
+        ({"overall_pass": True, "overall_status": "passed"}, True),
+        ({"overall_pass": False, "overall_status": "failed"}, True),
+        ({"overall_pass": False, "overall_status": "ineligible"}, False),
+        ({"overall_pass": False, "overall_status": "generation_error"}, False),
+        ({"overall_pass": False, "overall_status": "check_error"}, False),
+        ({"overall_pass": False}, True),
+    ],
+)
+def test_overall_eligibility_contract_includes_only_valid_verdicts(test_results, expected):
+    assert Evaluator._is_overall_eligible(test_results) is expected
+
+
+def test_summary_separates_all_outcomes_and_excludes_noneligible_results(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    statuses = ["passed", "failed", "ineligible", "generation_error", "check_error"]
+    results = [
+        {
+            "model": "model",
+            "provider": "OpenAI",
+            "root": "C",
+            "scale": "major",
+            "metrics": {},
+            "tests": {
+                "overall_pass": status == "passed",
+                "overall_status": status,
+            },
+            "error": "generation failed" if status == "generation_error" else None,
+        }
+        for status in statuses
+    ]
+
+    summary = evaluator._generate_summary(results, {"run_id": "outcome-test"})
+
+    assert summary["totals"]["eligible_generations"] == 2
+    assert summary["totals"]["overall_pass_count"] == 1
+    assert summary["totals"]["validation_failed_generations"] == 1
+    assert summary["totals"]["ineligible_generations"] == 1
+    assert summary["totals"]["generation_error_generations"] == 1
+    assert summary["totals"]["check_error_generations"] == 1
+    assert summary["totals"]["overall_pass_rate"] == 0.5
+    assert summary["by_model"]["model"]["check_errors"] == 1
+    assert summary["by_root"]["C"]["check_errors"] == 1
+    assert summary["by_scale"]["major"]["check_errors"] == 1
+
+
 def test_generate_tasks_copies_test_params_to_each_task(tmp_path):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
     test_params = {"polyphony": {"min_voices": 3}}
@@ -510,6 +684,44 @@ def test_test_params_reject_unselected_test(tmp_path):
             tests=["scale"],
             test_params={"polyphony": {"min_voices": 3}},
         )
+
+
+def test_run_tests_rejects_unknown_checks_before_running_any_check(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    def unexpected_scale_check(*args):
+        raise AssertionError("scale check should not run")
+
+    monkeypatch.setattr(
+        evaluator,
+        "AVAILABLE_TESTS",
+        {**evaluator.AVAILABLE_TESTS, "scale": unexpected_scale_check},
+    )
+
+    with pytest.raises(ValueError, match=r"Unknown tests: not_a_check"):
+        evaluator.run_tests(
+            midi_data=MidiFile(),
+            root="C",
+            scale="major",
+            prompt="melody",
+            tests=["not_a_check"],
+        )
+
+
+def test_evaluate_rejects_unknown_checks_before_creating_run_directory(tmp_path):
+    output_dir = tmp_path / "evaluations"
+    evaluator = Evaluator(output_dir=output_dir)
+
+    with pytest.raises(ValueError, match=r"Unknown tests: typo"):
+        evaluator.evaluate(
+            prompts="melody",
+            roots=["C"],
+            models=[],
+            run_name="invalid-check",
+            tests=["typo"],
+        )
+
+    assert not output_dir.exists()
 
 
 def test_summary_preserves_unknown_costs_and_excludes_failed_latency(tmp_path):
@@ -549,6 +761,28 @@ def test_summary_preserves_unknown_costs_and_excludes_failed_latency(tmp_path):
     assert summary["totals"]["total_time"] == 9.0
     assert summary["totals"]["avg_successful_latency"] == 2.0
     assert summary["by_model"]["unknown"]["avg_latency"] is None
+
+
+def test_summary_reports_latency_and_default_rates_for_ineligible_result(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    summary = evaluator._generate_summary(
+        [
+            {
+                "model": "model",
+                "provider": "Ollama",
+                "root": "C",
+                "scale": "major",
+                "metrics": {"api_latency": 2.0},
+                "tests": {"overall_pass": False, "overall_status": "ineligible"},
+                "error": None,
+            }
+        ],
+        {"run_id": "ineligible-metrics"},
+    )
+
+    assert summary["by_model"]["model"]["avg_latency"] == 2.0
+    assert summary["by_root"]["C"]["pass_rate"] == 0.0
+    assert summary["by_scale"]["major"]["pass_rate"] == 0.0
 
 
 def test_failed_generation_records_attempt_latency_and_contextual_log(monkeypatch, tmp_path):
