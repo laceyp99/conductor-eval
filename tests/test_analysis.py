@@ -5,6 +5,7 @@ import pandas as pd
 
 from conductor_eval.analysis import (
     _build_combined_html,
+    _overall_pass_rate_percent,
     build_chord_performance_by_model,
     build_cost_by_model,
     build_cost_vs_pass,
@@ -18,6 +19,8 @@ from conductor_eval.analysis import (
     build_major_vs_minor_by_model,
     build_model_root_heatmap,
     build_pass_rate_by_model,
+    build_reasoning_cost_effectiveness,
+    build_reasoning_toggle_comparison,
     build_texture_performance_by_model,
     compute_scatter_label_layout,
     compute_text_positions,
@@ -54,6 +57,76 @@ def test_latency_vs_pass_uses_all_attempts_for_pass_rate():
     }
 
     assert stats == {"alpha": (2.0, 50.0), "beta": (4.0, 0.0)}
+
+
+def test_tradeoff_charts_include_ineligible_generation_telemetry():
+    df = pd.DataFrame(
+        [
+            {
+                "model": "alpha",
+                "base_model": "alpha",
+                "api_latency": 1.0,
+                "cost": 1.0,
+                "overall_pass": True,
+            },
+            {
+                "model": "alpha",
+                "base_model": "alpha",
+                "api_latency": 9.0,
+                "cost": 9.0,
+                "overall_pass": None,
+            },
+        ]
+    )
+
+    latency = build_latency_vs_pass(df).data[0]
+    cost = build_cost_vs_pass(df).data[0]
+    reasoning = build_reasoning_cost_effectiveness(df).data[0]
+
+    assert list(latency.x) == [5.0]
+    assert list(latency.y) == [100.0]
+    assert list(cost.x) == [5.0]
+    assert list(cost.y) == [100.0]
+    assert list(reasoning.x) == [5.0]
+    assert list(reasoning.y) == [100.0]
+    assert list(reasoning.customdata[0]) == ["alpha", 1, 1, 2]
+
+
+def test_reasoning_toggle_uses_all_telemetry_and_only_eligible_pass_results():
+    df = pd.DataFrame(
+        [
+            {
+                "model": "alpha",
+                "base_model": "alpha",
+                "use_thinking": use_thinking,
+                "effort": None,
+                "api_latency": latency,
+                "cost": cost,
+                "overall_pass": overall_pass,
+            }
+            for use_thinking, latency, cost, overall_pass in [
+                (False, 1.0, 1.0, True),
+                (False, 9.0, 9.0, None),
+                (True, 2.0, 2.0, False),
+                (True, 10.0, 10.0, None),
+            ]
+        ]
+    )
+
+    figure = build_reasoning_toggle_comparison(df)
+
+    assert list(figure.data[0].x) == [100.0]
+    assert list(figure.data[1].x) == [0.0]
+    assert list(figure.data[2].x) == [5.0]
+    assert list(figure.data[3].x) == [6.0]
+    assert list(figure.data[4].x) == [5.0]
+    assert list(figure.data[5].x) == [6.0]
+
+
+def test_overall_pass_rate_percent_defaults_to_zero_for_all_ineligible_results():
+    df = pd.DataFrame([{"overall_pass": None}, {"overall_pass": None}])
+
+    assert _overall_pass_rate_percent(df) == 0.0
 
 
 def test_combined_html_escapes_run_metadata_and_preserves_unicode():

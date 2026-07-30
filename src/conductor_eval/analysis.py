@@ -102,6 +102,12 @@ def _eligible_overall_rows(df):
     return df.loc[df["overall_pass"].notna()]
 
 
+def _overall_pass_rate_percent(df):
+    """Return the eligible overall pass rate as a percentage, defaulting to zero."""
+    eligible = _eligible_overall_rows(df)
+    return eligible["overall_pass"].mean() * 100 if not eligible.empty else 0.0
+
+
 def _overall_statuses(df):
     """Return persisted outcome statuses, with a sensible legacy-result fallback."""
     if "overall_status" in df:
@@ -1278,16 +1284,21 @@ def build_latency_vs_pass(df):
     Returns:
         go.Figure: Scatter plot figure.
     """
-    df = _eligible_overall_rows(df)
     successful_rows = _successful_latency_rows(df)
-    if successful_rows.empty:
+    eligible_rows = _eligible_overall_rows(df)
+    if successful_rows.empty or eligible_rows.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
     latency_stats = (
-        successful_rows.groupby("model").agg(avg_latency=("api_latency", "mean")).reset_index()
+        successful_rows.groupby("model")
+        .agg(
+            avg_latency=("api_latency", "mean"),
+            latency_count=("api_latency", "count"),
+        )
+        .reset_index()
     )
     attempt_stats = (
-        df.groupby("model")
+        eligible_rows.groupby("model")
         .agg(
             pass_rate=("overall_pass", "mean"),
             count=("overall_pass", "count"),
@@ -1310,7 +1321,7 @@ def build_latency_vs_pass(df):
                 "Pass rate: %{y:.1f}%<extra></extra>"
             ),
             marker=dict(
-                size=stats["count"] / stats["count"].max() * 30 + 10,
+                size=stats["latency_count"] / stats["latency_count"].max() * 30 + 10,
                 color=[MODEL_COLORS[i % len(MODEL_COLORS)] for i in range(len(stats))],
             ),
         )
@@ -1400,19 +1411,25 @@ def build_cost_vs_pass(df):
     Returns:
         go.Figure: Scatter plot figure.
     """
-    df = _known_cost_rows(_eligible_overall_rows(df))
-    if df.empty:
+    known_cost_rows = _known_cost_rows(df)
+    eligible_rows = _eligible_overall_rows(df)
+    if known_cost_rows.empty or eligible_rows.empty:
         return apply_plotly_theme(go.Figure().update_layout(title="No reported costs"))
 
-    stats = (
-        df.groupby("model")
+    cost_stats = (
+        known_cost_rows.groupby("model")
         .agg(
             total_cost=("cost", "sum"),
-            tested=("cost", "count"),
-            pass_rate=("overall_pass", "mean"),
+            costed=("cost", "count"),
         )
         .reset_index()
     )
+    pass_stats = (
+        eligible_rows.groupby("model").agg(pass_rate=("overall_pass", "mean")).reset_index()
+    )
+    stats = cost_stats.merge(pass_stats, on="model", how="inner")
+    if stats.empty:
+        return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
     if stats["total_cost"].sum() == 0:
         fig = go.Figure()
@@ -1424,7 +1441,7 @@ def build_cost_vs_pass(df):
         fig.update_layout(title="Cost vs Pass Rate")
         return apply_plotly_theme(fig)
 
-    stats["cost_per_gen"] = stats["total_cost"] / stats["tested"]
+    stats["cost_per_gen"] = stats["total_cost"] / stats["costed"]
     stats["pass_rate"] = (stats["pass_rate"] * 100).round(1)
     stats = _sort_by_model(stats)
     x_bounds = _padded_axis_bounds(stats["cost_per_gen"])
@@ -1820,7 +1837,6 @@ def build_reasoning_toggle_comparison(df):
     Returns:
         go.Figure: Grouped bar chart figure.
     """
-    df = _eligible_overall_rows(df)
     if df.empty or "base_model" not in df.columns:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
@@ -1862,16 +1878,22 @@ def build_reasoning_toggle_comparison(df):
         mask = df["base_model"] == base
         std = df.loc[mask & ~df["use_thinking"]]
         reas = df.loc[mask & df["use_thinking"]]
-        std_rates.append(round(std["overall_pass"].mean() * 100, 1) if len(std) > 0 else 0)
-        reas_rates.append(round(reas["overall_pass"].mean() * 100, 1) if len(reas) > 0 else 0)
+        std_eligible = _eligible_overall_rows(std)
+        reas_eligible = _eligible_overall_rows(reas)
+        std_rates.append(
+            round(std_eligible["overall_pass"].mean() * 100, 1) if not std_eligible.empty else 0
+        )
+        reas_rates.append(
+            round(reas_eligible["overall_pass"].mean() * 100, 1) if not reas_eligible.empty else 0
+        )
         std_latencies.append(round(std["api_latency"].mean(), 1) if len(std) > 0 else 0)
         reas_latencies.append(round(reas["api_latency"].mean(), 1) if len(reas) > 0 else 0)
         std_costs.append(round(std["cost"].mean(), 5) if len(std) > 0 else 0)
         reas_costs.append(round(reas["cost"].mean(), 5) if len(reas) > 0 else 0)
-        std_counts.append(len(std))
-        reas_counts.append(len(reas))
-        std_passed.append(int(std["overall_pass"].sum()))
-        reas_passed.append(int(reas["overall_pass"].sum()))
+        std_counts.append(len(std_eligible))
+        reas_counts.append(len(reas_eligible))
+        std_passed.append(int(std_eligible["overall_pass"].sum()))
+        reas_passed.append(int(reas_eligible["overall_pass"].sum()))
 
     from plotly.subplots import make_subplots
 
@@ -2018,21 +2040,32 @@ def build_reasoning_cost_effectiveness(df):
     Returns:
         go.Figure: Scatter plot figure.
     """
-    df = _known_cost_rows(_eligible_overall_rows(df))
     if df.empty or "base_model" not in df.columns:
         return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
-    stats = (
+    metric_stats = (
         df.groupby(["model", "base_model"])
         .agg(
             total_cost=("cost", "sum"),
-            tested=("cost", "count"),
-            passed=("overall_pass", "sum"),
-            pass_rate=("overall_pass", "mean"),
+            costed=("cost", "count"),
             avg_latency=("api_latency", "mean"),
         )
         .reset_index()
     )
+    metric_stats = metric_stats[metric_stats["costed"] > 0]
+    eligible_rows = _eligible_overall_rows(df)
+    pass_stats = (
+        eligible_rows.groupby(["model", "base_model"])
+        .agg(
+            passed=("overall_pass", "sum"),
+            eligible=("overall_pass", "count"),
+            pass_rate=("overall_pass", "mean"),
+        )
+        .reset_index()
+    )
+    stats = metric_stats.merge(pass_stats, on=["model", "base_model"], how="inner")
+    if stats.empty:
+        return apply_plotly_theme(go.Figure().update_layout(title="No data"))
 
     if stats["total_cost"].sum() == 0:
         fig = go.Figure()
@@ -2044,7 +2077,7 @@ def build_reasoning_cost_effectiveness(df):
         fig.update_layout(title="Reasoning Cost-Effectiveness")
         return apply_plotly_theme(fig)
 
-    stats["cost_per_gen"] = stats["total_cost"] / stats["tested"]
+    stats["cost_per_gen"] = stats["total_cost"] / stats["costed"]
     stats["pass_rate_pct"] = (stats["pass_rate"] * 100).round(1)
     stats = _sort_by_model(stats)
     x_bounds = _padded_axis_bounds(stats["cost_per_gen"])
@@ -2084,13 +2117,15 @@ def build_reasoning_cost_effectiveness(df):
                     zip(
                         bm_stats["model"],
                         bm_stats["passed"].astype(int),
-                        bm_stats["tested"].astype(int),
+                        bm_stats["eligible"].astype(int),
+                        bm_stats["costed"].astype(int),
                     )
                 ),
                 hovertemplate=(
                     "Model: %{customdata[0]}<br>Cost per generation: $%{x:.5f}<br>"
                     "Pass rate: %{y:.1f}%<br>Passed: %{customdata[1]}<br>"
-                    "Generations: %{customdata[2]}<extra></extra>"
+                    "Eligible generations: %{customdata[2]}<br>"
+                    "Costed generations: %{customdata[3]}<extra></extra>"
                 ),
                 marker=dict(size=12, color=color_map[base]),
             )
@@ -2696,6 +2731,7 @@ def create_app(run_path):
             ]
             n_effort_models = effort_rows["base_model"].nunique() if not effort_rows.empty else 0
             n_toggle_models = toggle_rows["base_model"].nunique() if not toggle_rows.empty else 0
+            avg_pass_rate = _overall_pass_rate_percent(filtered)
 
             cards = dbc.Row(
                 [
@@ -2726,7 +2762,7 @@ def create_app(run_path):
                     dbc.Col(
                         make_metric_card(
                             "Avg Pass Rate",
-                            f"{filtered['overall_pass'].mean() * 100:.1f}%",
+                            f"{avg_pass_rate:.1f}%",
                         ),
                         md=3,
                     ),
