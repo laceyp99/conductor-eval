@@ -686,6 +686,44 @@ def test_test_params_reject_unselected_test(tmp_path):
         )
 
 
+def test_run_tests_rejects_unknown_checks_before_running_any_check(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+
+    def unexpected_scale_check(*args):
+        raise AssertionError("scale check should not run")
+
+    monkeypatch.setattr(
+        evaluator,
+        "AVAILABLE_TESTS",
+        {**evaluator.AVAILABLE_TESTS, "scale": unexpected_scale_check},
+    )
+
+    with pytest.raises(ValueError, match=r"Unknown tests: not_a_check"):
+        evaluator.run_tests(
+            midi_data=MidiFile(),
+            root="C",
+            scale="major",
+            prompt="melody",
+            tests=["not_a_check"],
+        )
+
+
+def test_evaluate_rejects_unknown_checks_before_creating_run_directory(tmp_path):
+    output_dir = tmp_path / "evaluations"
+    evaluator = Evaluator(output_dir=output_dir)
+
+    with pytest.raises(ValueError, match=r"Unknown tests: typo"):
+        evaluator.evaluate(
+            prompts="melody",
+            roots=["C"],
+            models=[],
+            run_name="invalid-check",
+            tests=["typo"],
+        )
+
+    assert not output_dir.exists()
+
+
 def test_summary_preserves_unknown_costs_and_excludes_failed_latency(tmp_path):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
     summary = evaluator._generate_summary(

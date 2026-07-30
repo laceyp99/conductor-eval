@@ -142,9 +142,12 @@ class Evaluator:
         "chord_event_positions": chord_event_positions_test,
     }
 
-    @staticmethod
-    def _with_required_scale_test(tests: list[str]) -> list[str]:
-        """Return selected tests with the always-on scale check included once."""
+    @classmethod
+    def _with_required_scale_test(cls, tests: list[str]) -> list[str]:
+        """Validate selected tests and include the always-on scale check once."""
+        unknown = sorted(set(tests) - set(cls.AVAILABLE_TESTS))
+        if unknown:
+            raise ValueError("Unknown tests: " + ", ".join(unknown))
         if "scale" in tests:
             return list(tests)
         return ["scale", *tests]
