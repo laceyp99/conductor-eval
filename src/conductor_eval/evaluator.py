@@ -1295,6 +1295,7 @@ class Evaluator:
                     "check_errors": 0,
                     "ineligible": 0,
                     "eligible": 0,
+                    "pass_rate": 0.0,
                 }
             summary["by_root"][root]["tested"] += 1
             if outcome == "passed":
@@ -1321,6 +1322,7 @@ class Evaluator:
                     "check_errors": 0,
                     "ineligible": 0,
                     "eligible": 0,
+                    "pass_rate": 0.0,
                 }
             summary["by_scale"][scale]["tested"] += 1
             if outcome == "passed":

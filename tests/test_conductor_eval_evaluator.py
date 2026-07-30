@@ -725,6 +725,28 @@ def test_summary_preserves_unknown_costs_and_excludes_failed_latency(tmp_path):
     assert summary["by_model"]["unknown"]["avg_latency"] is None
 
 
+def test_summary_reports_latency_and_default_rates_for_ineligible_result(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    summary = evaluator._generate_summary(
+        [
+            {
+                "model": "model",
+                "provider": "Ollama",
+                "root": "C",
+                "scale": "major",
+                "metrics": {"api_latency": 2.0},
+                "tests": {"overall_pass": False, "overall_status": "ineligible"},
+                "error": None,
+            }
+        ],
+        {"run_id": "ineligible-metrics"},
+    )
+
+    assert summary["by_model"]["model"]["avg_latency"] == 2.0
+    assert summary["by_root"]["C"]["pass_rate"] == 0.0
+    assert summary["by_scale"]["major"]["pass_rate"] == 0.0
+
+
 def test_failed_generation_records_attempt_latency_and_contextual_log(monkeypatch, tmp_path):
     class FailingAdapter:
         def __init__(self, output_dir):
