@@ -1,4 +1,6 @@
-# Conductor Evaluation Framework
+<div align="center">
+  <img src="app/readme-logo.png" alt="Conductor Eval Logo" width="50%">
+</div>
 
 A unified evaluation framework for testing MIDI loop generation across multiple AI models, with an interactive Plotly Dash dashboard for analyzing results.
 
