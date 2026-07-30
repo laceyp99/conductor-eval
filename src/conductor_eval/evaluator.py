@@ -1346,8 +1346,8 @@ class Evaluator:
         for model, m in summary["by_model"].items():
             if m["eligible"] > 0:
                 m["pass_rate"] = m["passed"] / m["eligible"]
-                if m["successful_latency_count"]:
-                    m["avg_latency"] = m["total_latency"] / m["successful_latency_count"]
+            if m["successful_latency_count"]:
+                m["avg_latency"] = m["total_latency"] / m["successful_latency_count"]
 
         if summary["totals"]["successful_latency_count"]:
             summary["totals"]["avg_successful_latency"] = (
