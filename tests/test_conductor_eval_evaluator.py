@@ -500,6 +500,28 @@ def test_run_tests_marks_empty_midi_ineligible_under_default_checks(tmp_path):
     assert results["overall_status"] == "ineligible"
 
 
+def test_run_tests_marks_dangling_note_ineligible_under_default_checks(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    midi = MidiFile(ticks_per_beat=480)
+    track = midi.add_track()
+    track.append(Message("note_on", note=60, velocity=80, time=0))
+
+    results = evaluator.run_tests(
+        midi_data=midi,
+        root="C",
+        scale="major",
+        prompt="use quarter notes",
+        tests=["scale", "duration"],
+    )
+
+    assert results["scale"]["total"] == 0
+    assert results["scale"]["status"] == "ineligible"
+    assert results["duration"]["total"] == 0
+    assert results["duration"]["status"] == "ineligible"
+    assert results["overall_pass"] is False
+    assert results["overall_status"] == "ineligible"
+
+
 @pytest.mark.parametrize("texture_test", ["monophony", "polyphony"])
 def test_run_tests_requires_completed_notes_for_texture_evidence(tmp_path, texture_test):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")

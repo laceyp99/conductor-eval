@@ -53,17 +53,17 @@ def scale_test(midi, root, scale):
     correct_pitches = set()
     incorrect_pitches = set()
 
-    # Iterate through all messages in the MIDI file.
-    for msg in midi:
-        if msg.type == "note_on" and msg.velocity > 0:
-            # print(f"Checking note: {msg.note}, Pitch Class: {msg.note % 12}")
-            total += 1
-            if (msg.note % 12) in acceptable_pcs:
-                correct += 1
-                correct_pitches.add(msg.note % 12)
-            else:
-                incorrect += 1
-                incorrect_pitches.add(msg.note % 12)
+    # Only completed notes provide substantive evidence. This keeps dangling
+    # note-on events in malformed or truncated MIDI from producing a scale pass.
+    for note in extract_note_intervals(midi):
+        pitch_class = note.pitch % 12
+        total += 1
+        if pitch_class in acceptable_pcs:
+            correct += 1
+            correct_pitches.add(pitch_class)
+        else:
+            incorrect += 1
+            incorrect_pitches.add(pitch_class)
 
     results = {
         "total": total,

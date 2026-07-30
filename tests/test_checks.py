@@ -88,6 +88,23 @@ def test_monophony_test_passes_for_sequential_notes():
     assert result["max_polyphony"] == 1
 
 
+def test_scale_test_ignores_incomplete_notes():
+    midi = make_midi(
+        [
+            Message("note_on", note=60, velocity=80, time=0),
+            Message("note_on", note=61, velocity=80, time=480),
+            Message("note_off", note=61, velocity=0, time=480),
+        ]
+    )
+
+    result = scale_test(midi, "C", "major")
+
+    assert result["total"] == 1
+    assert result["correct"] == 0
+    assert result["incorrect"] == 1
+    assert result["pitches"] == {"correct": [], "incorrect": [1]}
+
+
 def test_monophony_test_detects_overlap_across_tracks():
     midi = make_midi(
         [
