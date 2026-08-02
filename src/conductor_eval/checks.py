@@ -100,29 +100,14 @@ def duration_test(midi, duration):
     incorrect = 0
     incorrect_lengths = {}
 
-    for track in midi.tracks:
-        active_notes = {}
-        current_time_ticks = 0
-        for msg in track:
-            current_time_ticks += msg.time
-            if msg.type == "note_on" and msg.velocity > 0:
-                active_notes[msg.note] = current_time_ticks
-            elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
-                if msg.note in active_notes:
-                    total += 1
-                    start_time = active_notes.pop(msg.note)
-                    note_duration = current_time_ticks - start_time
-                    # print(f"Note {msg.note} duration: {note_duration} ticks")
-
-                    if note_duration != expected_ticks:
-                        incorrect += 1
-                        ratio = ticks_to_beats(note_duration, ticks_per_beat, "note_duration")
-                        if ratio not in incorrect_lengths.keys():
-                            incorrect_lengths[ratio] = 1
-                        else:
-                            incorrect_lengths[ratio] += 1
-                    else:
-                        correct += 1
+    for note in extract_note_intervals(midi):
+        total += 1
+        if note.duration_ticks != expected_ticks:
+            incorrect += 1
+            ratio = ticks_to_beats(note.duration_ticks, ticks_per_beat, "note_duration")
+            incorrect_lengths[ratio] = incorrect_lengths.get(ratio, 0) + 1
+        else:
+            correct += 1
     results = {
         "total": total,
         "correct": correct,

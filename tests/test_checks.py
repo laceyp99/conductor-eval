@@ -4,6 +4,7 @@ from mido import Message, MidiFile, MidiTrack
 from conductor_eval.checks import (
     chord_event_positions_test,
     chord_progression_test,
+    duration_test,
     harmonic_rhythm_test,
     monophony_test,
     polyphony_test,
@@ -103,6 +104,46 @@ def test_scale_test_ignores_incomplete_notes():
     assert result["correct"] == 0
     assert result["incorrect"] == 1
     assert result["pitches"] == {"correct": [], "incorrect": [1]}
+
+
+def test_duration_test_pairs_same_pitch_notes_by_channel():
+    midi = make_midi(
+        [
+            Message("note_on", channel=0, note=60, velocity=80, time=0),
+            Message("note_on", channel=1, note=60, velocity=80, time=240),
+            Message("note_off", channel=0, note=60, velocity=0, time=480),
+            Message("note_on", channel=1, note=60, velocity=0, time=0),
+        ]
+    )
+
+    result = duration_test(midi, "quarter")
+
+    assert result == {
+        "total": 2,
+        "correct": 1,
+        "incorrect": 1,
+        "lengths": {1.5: 1},
+    }
+
+
+def test_duration_test_pairs_same_channel_retriggers_fifo():
+    midi = make_midi(
+        [
+            Message("note_on", channel=0, note=60, velocity=80, time=0),
+            Message("note_on", channel=0, note=60, velocity=80, time=240),
+            Message("note_off", channel=0, note=60, velocity=0, time=240),
+            Message("note_on", channel=0, note=60, velocity=0, time=240),
+        ]
+    )
+
+    result = duration_test(midi, "quarter")
+
+    assert result == {
+        "total": 2,
+        "correct": 2,
+        "incorrect": 0,
+        "lengths": {},
+    }
 
 
 def test_monophony_test_detects_overlap_across_tracks():
