@@ -99,7 +99,22 @@ def test_evaluations_keep_logs_and_artifacts_isolated_when_overlapping(monkeypat
 
     def generate_tasks(**kwargs):
         marker = kwargs["resolved_models"][0][1]
-        return [{"provider": "Ollama", "model": marker, "marker": marker}]
+        return [
+            {
+                "provider": "Ollama",
+                "model": marker,
+                "marker": marker,
+                "original_prompt": "warm loop",
+                "full_prompt": "warm loop in C major",
+                "root": "C",
+                "scale": "major",
+                "use_thinking": False,
+                "effort": None,
+                "variation_name": "standard",
+                "test_params": {},
+                "task_id": f"task-{marker}",
+            }
+        ]
 
     def run_single(task, run_path, tests_to_run, logger):
         task_barrier.wait(timeout=5)
@@ -337,6 +352,132 @@ def test_generate_tasks_qualifies_repeated_identical_tasks_with_occurrences(tmp_
 
     major_ids = [task["task_id"] for task in tasks if task["scale"] == "major"]
     assert [task_id.rsplit("-", 1)[-1] for task_id in major_ids] == ["1", "2", "3"]
+
+
+def test_complete_queued_manifest_exists_before_dispatch(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations", temperature=0.25)
+    monkeypatch.setattr(evaluator, "_resolve_models", lambda models: [("Ollama", "local-test")])
+
+    def inspect_before_dispatch(tasks, run_path, tests_to_run, logger, manifest):
+        stored = json.loads((run_path / "task_manifest.json").read_text(encoding="utf-8"))
+        assert stored == manifest
+        assert len(stored["tasks"]) == len(tasks) == 2
+        assert {entry["execution"]["state"] for entry in stored["tasks"]} == {"queued"}
+        return []
+
+    monkeypatch.setattr(evaluator, "_run_sync_batch", inspect_before_dispatch)
+
+    evaluator.evaluate(
+        prompts="warm loop",
+        roots=["C"],
+        models=[],
+        run_name="manifest-before-dispatch",
+    )
+
+
+def test_manifest_task_spec_is_complete_and_secret_free(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations", temperature=0.4)
+    monkeypatch.setenv("OPENAI_API_KEY", "credential-must-not-appear")
+    tasks = evaluator._generate_tasks(
+        prompts=["warm loop"],
+        roots=["C"],
+        resolved_models=[("OpenAI", "gpt-test")],
+        tests=["scale", "duration"],
+        test_reasoning=False,
+        test_params={"duration": {"duration": 1.0}},
+    )
+
+    manifest = evaluator._create_task_manifest(
+        run_id="manifest-test",
+        tasks=tasks,
+        tests=["scale", "duration"],
+        effective_rates={("OpenAI", "gpt-test"): 5},
+    )
+    entry = manifest["tasks"][0]
+
+    assert manifest["schema_version"] == 1
+    assert entry["task_id"] == tasks[0]["task_id"]
+    assert entry["spec"] == {
+        "provider": "OpenAI",
+        "model": "gpt-test",
+        "original_prompt": "warm loop",
+        "full_prompt": "warm loop in C major",
+        "root": "C",
+        "scale": "major",
+        "use_thinking": False,
+        "effort": None,
+        "variation_name": "standard",
+        "test_params": {"duration": {"duration": 1.0}},
+        "tests": ["scale", "duration"],
+        "temperature": 0.4,
+        "effective_rpm": 5,
+    }
+    serialized = json.dumps(manifest)
+    assert "credential-must-not-appear" not in serialized
+    assert "messages" not in serialized
+    assert "response" not in serialized
+
+
+def test_manifest_updates_remain_atomic_json_during_transitions(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+    tasks = evaluator._generate_tasks(
+        prompts=["warm loop"] * 10,
+        roots=["C"],
+        resolved_models=[("OpenAI", "gpt-test")],
+        tests=["scale"],
+        test_reasoning=False,
+    )
+    manifest = evaluator._create_task_manifest(
+        run_id="atomic-test",
+        tasks=tasks,
+        tests=["scale"],
+        effective_rates={("OpenAI", "gpt-test"): 5},
+    )
+    evaluator._write_manifest(run_path, manifest)
+    stop_reading = threading.Event()
+    read_errors = []
+
+    def read_manifest_repeatedly():
+        while not stop_reading.is_set():
+            try:
+                json.loads((run_path / "task_manifest.json").read_text(encoding="utf-8"))
+            except PermissionError:
+                # Windows can briefly deny a reader during an atomic replace;
+                # retrying must never expose a partial JSON document.
+                continue
+            except Exception as error:
+                read_errors.append(error)
+                stop_reading.set()
+
+    reader = threading.Thread(target=read_manifest_repeatedly)
+    reader.start()
+    try:
+        for task in tasks:
+            evaluator._transition_manifest_task(
+                run_path,
+                manifest,
+                task["task_id"],
+                "dispatched",
+                dispatched_at="2026-08-02T12:00:00-04:00",
+            )
+            evaluator._transition_manifest_task(
+                run_path,
+                manifest,
+                task["task_id"],
+                "completed",
+                terminal_at="2026-08-02T12:00:01-04:00",
+            )
+    finally:
+        stop_reading.set()
+        reader.join(timeout=5)
+
+    stored = json.loads((run_path / "task_manifest.json").read_text(encoding="utf-8"))
+    assert not reader.is_alive()
+    assert not read_errors
+    assert {entry["execution"]["state"] for entry in stored["tasks"]} == {"completed"}
+    assert not (run_path / "task_manifest.json.tmp").exists()
 
 
 def test_save_results_uses_compact_task_directory_and_fails_on_collision(tmp_path):

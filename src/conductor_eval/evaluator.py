@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 import traceback
 from datetime import datetime
@@ -272,7 +273,7 @@ class Evaluator:
 
         # Resolve every paid model and its limits before creating run output.
         resolved_models = self._resolve_models(models)
-        rate_config, _ = self._resolve_rate_config(
+        rate_config, effective_rates = self._resolve_rate_config(
             resolved_models=resolved_models,
             rpm_overrides=rpm_overrides,
             per_model_concurrency=per_model_concurrency,
@@ -310,6 +311,13 @@ class Evaluator:
                 test_reasoning=test_reasoning,
                 test_params=test_params,
             )
+            manifest = self._create_task_manifest(
+                run_id=run_id,
+                tasks=tasks,
+                tests=tests,
+                effective_rates=effective_rates,
+            )
+            self._write_manifest(run_path, manifest)
             logger.info("Starting evaluation '%s' with %d total tasks", run_name, len(tasks))
 
             # Separate async and sync tasks
@@ -321,13 +329,13 @@ class Evaluator:
             # Run async tasks (cloud providers)
             if async_tasks:
                 async_results = asyncio.run(
-                    self._run_async_batch(async_tasks, run_path, tests, logger)
+                    self._run_async_batch(async_tasks, run_path, tests, logger, manifest)
                 )
                 all_results.extend(async_results)
 
             # Run sync tasks (Ollama)
             if sync_tasks:
-                sync_results = self._run_sync_batch(sync_tasks, run_path, tests, logger)
+                sync_results = self._run_sync_batch(sync_tasks, run_path, tests, logger, manifest)
                 all_results.extend(sync_results)
 
             # Generate and save summary
@@ -926,12 +934,109 @@ class Evaluator:
 
         return variations
 
+    def _create_task_manifest(
+        self,
+        run_id: str,
+        tasks: list[dict],
+        tests: list[str],
+        effective_rates: dict[tuple[str, str], int],
+    ) -> dict:
+        """Build the complete immutable workload and initial execution state."""
+        manifest_tasks = []
+        for task in tasks:
+            provider = task["provider"]
+            model = task["model"]
+            manifest_tasks.append(
+                {
+                    "task_id": task["task_id"],
+                    "spec": {
+                        "provider": provider,
+                        "model": model,
+                        "original_prompt": task["original_prompt"],
+                        "full_prompt": task["full_prompt"],
+                        "root": task["root"],
+                        "scale": task["scale"],
+                        "use_thinking": task["use_thinking"],
+                        "effort": task["effort"],
+                        "variation_name": task["variation_name"],
+                        "test_params": task.get("test_params", {}),
+                        "tests": list(tests),
+                        "temperature": self.temperature,
+                        "effective_rpm": effective_rates.get((provider, model)),
+                    },
+                    "execution": {
+                        "state": "queued",
+                        "dispatched_at": None,
+                        "terminal_at": None,
+                        "throttle_task_id": None,
+                    },
+                }
+            )
+
+        return {
+            "schema_version": 1,
+            "run_id": run_id,
+            "tasks": manifest_tasks,
+        }
+
+    @staticmethod
+    def _write_manifest(run_path: Path, manifest: dict) -> None:
+        """Durably replace the task manifest with a complete JSON document."""
+        manifest_path = run_path / "task_manifest.json"
+        temporary_path = run_path / "task_manifest.json.tmp"
+        try:
+            with open(temporary_path, "w", encoding="utf-8") as file:
+                json.dump(manifest, file, indent=2)
+                file.flush()
+                os.fsync(file.fileno())
+            for attempt in range(50):
+                try:
+                    os.replace(temporary_path, manifest_path)
+                    break
+                except PermissionError:
+                    if attempt == 49:
+                        raise
+                    # Windows may deny replacement while a reader briefly has
+                    # the destination open. The old complete file remains live.
+                    time.sleep(0.01)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def _transition_manifest_task(
+        self,
+        run_path: Path,
+        manifest: dict,
+        task_id: str,
+        state: str,
+        **updates: object,
+    ) -> None:
+        """Apply one serialized task-state transition and atomically persist it."""
+        manifest_task = next(
+            (entry for entry in manifest["tasks"] if entry["task_id"] == task_id), None
+        )
+        if manifest_task is None:
+            raise ValueError(f"Unknown manifest task: {task_id}")
+
+        execution = manifest_task["execution"]
+        current_state = execution["state"]
+        allowed_transitions = {
+            "queued": {"dispatched", "unstarted_due_to_throttling"},
+            "dispatched": {"completed", "failed", "throttled"},
+        }
+        if state not in allowed_transitions.get(current_state, set()):
+            raise ValueError(f"Invalid manifest transition: {current_state} -> {state}")
+
+        execution["state"] = state
+        execution.update(updates)
+        self._write_manifest(run_path, manifest)
+
     async def _run_async_batch(
         self,
         tasks: list[dict],
         run_path: Path,
         tests_to_run: list[str],
         logger: logging.Logger,
+        manifest: dict,
     ) -> list[dict]:
         """
         Run tasks asynchronously with rate limiting.
@@ -972,13 +1077,28 @@ class Evaluator:
         async def run_single_task(task: dict) -> dict:
             provider = task["provider"]
             async with semaphores.get(provider, asyncio.Semaphore(1)):
-                return await asyncio.to_thread(
+                self._transition_manifest_task(
+                    run_path,
+                    manifest,
+                    task["task_id"],
+                    "dispatched",
+                    dispatched_at=datetime.now().astimezone().isoformat(),
+                )
+                result = await asyncio.to_thread(
                     self._run_single,
                     task=task,
                     run_path=run_path,
                     tests_to_run=tests_to_run,
                     logger=logger,
                 )
+                self._transition_manifest_task(
+                    run_path,
+                    manifest,
+                    task["task_id"],
+                    "failed" if result.get("error") else "completed",
+                    terminal_at=datetime.now().astimezone().isoformat(),
+                )
+                return result
 
         with Live(table, console=self.console, refresh_per_second=2) as live:
             # Create all async tasks
@@ -1052,6 +1172,7 @@ class Evaluator:
         run_path: Path,
         tests_to_run: list[str],
         logger: logging.Logger,
+        manifest: dict,
     ) -> list[dict]:
         """
         Run tasks synchronously (for Ollama).
@@ -1078,7 +1199,21 @@ class Evaluator:
 
         with Live(table, console=self.console, refresh_per_second=2) as live:
             for i, task in enumerate(tasks):
+                self._transition_manifest_task(
+                    run_path,
+                    manifest,
+                    task["task_id"],
+                    "dispatched",
+                    dispatched_at=datetime.now().astimezone().isoformat(),
+                )
                 result = self._run_single(task, run_path, tests_to_run, logger)
+                self._transition_manifest_task(
+                    run_path,
+                    manifest,
+                    task["task_id"],
+                    "failed" if result.get("error") else "completed",
+                    terminal_at=datetime.now().astimezone().isoformat(),
+                )
                 results.append(result)
 
                 # Update table
