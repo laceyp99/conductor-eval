@@ -204,6 +204,46 @@ Eval uses provider metadata to organize batches and reports, but generation
 requests identify only the selected model. Conductor Core resolves the actual
 provider route and records that provider with its generation artifacts.
 
+### Cloud Rate Scheduling
+
+Eval spaces cloud request starts independently for each `(provider, base_model)`.
+The first request for a model may start immediately; later starts are separated
+by at least `60 / RPM` seconds measured with a monotonic clock. The next slot is
+always calculated from the actual previous Core-generation start, so delayed
+work never causes a catch-up burst. Prompts, roots, scales, and reasoning
+variations for one base model share the same FIFO schedule, while other model
+queues can advance independently.
+
+Core metadata supplies the default RPM. Account-specific limits can be recorded
+for one run with nested provider/model overrides:
+
+```python
+results = evaluator.evaluate(
+    prompts="an arpeggiator using only quarter notes",
+    roots=["C", "G"],
+    models=["gpt-5", "claude-sonnet-4-5"],
+    run_name="paced_account_tier",
+    rpm_overrides={
+        "OpenAI": {"gpt-5": 60},
+        "Anthropic": {"claude-sonnet-4-5": 40},
+    },
+    per_model_concurrency=5,
+    global_cloud_concurrency=25,
+)
+```
+
+Override precedence is run override, then Core baseline, otherwise failure.
+RPM and concurrency values must be positive integers; booleans, strings,
+decimals, zero, and negative values are rejected. Unknown providers/models,
+duplicate case-insensitive provider keys, and overrides for unselected models
+are also rejected. Model resolution and all of this validation happen before a
+run directory or provider request is created.
+
+RPM pacing is separate from concurrency. `per_model_concurrency` defaults to
+`5`, allowing slow requests for one model to overlap, while
+`global_cloud_concurrency` defaults to `25` and bounds all cloud work. Both are
+upper bounds.
+
 ### Testing Reasoning Variations
 
 When `test_reasoning=True`, the evaluator tests all thinking modes and effort levels for compatible models:
@@ -261,6 +301,7 @@ directory (shown here with the default suite root):
 └── 20260210_224954_123456_my_first_eval-<hash>_<uuid16>/
     ├── run.log                        # Eval-owned lifecycle and error log
     ├── config.json                    # Full evaluation configuration
+    ├── task_manifest.json             # Immutable task specs + live execution state
     ├── summary.json                   # Aggregated results + statistics
     ├── core_artifacts/                # Core-owned MIDI, messages, and metadata
     ├── analysis/                      # Created by dashboard export
@@ -319,9 +360,39 @@ Stores the full configuration used for the run:
     "models": [["OpenAI", "gpt-5"]],
     "tests": ["scale", "duration"],
     "test_reasoning": false,
-    "temperature": 0.0
+    "temperature": 0.0,
+    "rate_limits": {
+        "per_model_concurrency": 5,
+        "global_cloud_concurrency": 25,
+        "models": [
+            {
+                "provider": "OpenAI",
+                "model": "gpt-5",
+                "baseline_rpm": 500,
+                "override_rpm": null,
+                "effective_rpm": 500,
+                "source": "core"
+            }
+        ]
+    }
 }
 ```
+
+#### task_manifest.json
+
+The versioned manifest is written with every task in `queued` state before
+dispatch begins. Each entry separates an immutable `spec` (provider, model,
+prompts, musical inputs, reasoning settings, tests, temperature, and effective
+RPM) from mutable `execution` state. Meaningful state changes atomically replace
+the complete JSON file through one evaluator-owned write path.
+
+Execution states are `queued`, `dispatched`, `completed`, `failed`, `throttled`,
+and `unstarted_due_to_throttling`. Unstarted entries link to the triggering
+throttled task and never receive synthetic result directories. The manifest
+contains prompts because they are required task inputs, but excludes provider
+responses, generated messages, credentials, and environment values. It records
+enough immutable state for a future explicit resume feature; this release does
+not execute resumed runs.
 
 #### summary.json
 
@@ -332,9 +403,16 @@ Aggregated statistics for the entire run:
     "run_id": "20260207_143022_123456_my_first_eval-<hash>_<uuid16>",
     "totals": {
         "total_generations": 48,
+        "planned_tasks": 51,
+        "dispatched_tasks": 48,
+        "completed_tasks": 45,
+        "generation_failure_tasks": 2,
+        "throttled_generation_tasks": 1,
+        "unstarted_due_to_throttling_tasks": 3,
         "successful_generations": 45,
         "failed_generations": 3,
         "generation_error_generations": 3,
+        "throttled_generations": 1,
         "check_error_generations": 0,
         "validation_failed_generations": 6,
         "ineligible_generations": 3,
@@ -413,6 +491,10 @@ an `overall_status` of `passed`, `failed`, `ineligible`, `generation_error`, or
 `check_error`. A check with no examined notes is ineligible and can never make
 `overall_pass` true. A checker exception is a `check_error`, is excluded from pass-rate
 denominators, and is reported separately from a musical validation failure.
+Typed provider rate-limit failures remain generation results with
+`error_type: "ProviderRateLimitError"` and
+`failure_kind: "provider_rate_limit"`; they are operational failures and never
+enter musical pass-rate denominators.
 
 
 ## Analysis
@@ -486,15 +568,24 @@ The exported HTML files are self-contained and can be shared without a running s
 
 The evaluator continues on failures, logging errors and saving partial results:
 
-- API errors are captured in `test_results.json` with an `"error"` field
+- API errors are captured in `test_results.json` with `error`, `error_type`, and
+  an optional structured `failure_kind`
 - Failed generations are counted in `summary.json` under `failed_generations`
 - Core generation or MIDI conversion errors are logged but don't halt the evaluation
+- The first typed provider rate-limit failure stops only that provider/model's
+  queued work; already dispatched work finishes and other model queues continue
+- Eval does not automatically retry provider failures or spend additional calls
 - Eval-owned logs are written to `<output_dir>/<run-id>/run.log`
 - Host application, root logger, and unrelated library output are not redirected
 
 ## Performance Notes
 
-- **Cloud providers** run asynchronously with rate limiting based on RPM from `model_list.json`
+- **Cloud providers** use evenly spaced per-model starts plus independent model/global concurrency caps
 - **Ollama** runs synchronously, sorted by model to minimize GPU memory swaps
 - A live Rich progress table displays during evaluation with per-model pass rates, latency, and cost
 - Large evaluations (many models x many prompts x many roots) can take significant time and incur API costs
+
+TPM and RPD metadata is preserved but not scheduled. Automatic retries,
+`Retry-After` coordination, account-tier discovery, distributed limit sharing,
+and resume execution are also out of scope. Throttle and unstarted counters are
+JSON-only; this change does not add Rich progress columns or Dash visualizations.

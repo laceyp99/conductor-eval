@@ -1559,6 +1559,7 @@ class Evaluator:
         Args:
             all_results: List of all result dictionaries
             config: Original configuration dictionary
+            manifest: Optional live task manifest for operational counters.
 
         Returns:
             dict: Summary with aggregated statistics

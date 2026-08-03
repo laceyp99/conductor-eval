@@ -188,6 +188,17 @@ def _write_run(tmp_path, tests):
     return run_path
 
 
+def test_load_run_remains_compatible_with_pre_manifest_runs(tmp_path):
+    run_path = _write_run(tmp_path, {"overall_status": "passed"})
+
+    dataframe, config, summary = load_run(run_path)
+
+    assert not (run_path / "task_manifest.json").exists()
+    assert len(dataframe) == 1
+    assert config["run_name"] == "analysis-test"
+    assert summary == {}
+
+
 def test_load_run_flattens_new_check_results(tmp_path):
     run_path = _write_run(
         tmp_path,
