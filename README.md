@@ -11,19 +11,44 @@ reasoning-mode differences across real models.
 
 ## Installation
 
-From the `conductor-eval` project directory, create a virtual environment,
-install a compatible published Core release with provider support, then install
-Eval with its dashboard and development extras:
+### Develop with uv
+
+Eval uses [uv](https://docs.astral.sh/uv/) 0.11.16 or newer for its primary
+development workflow. From the `conductor-eval` project directory, create the
+locked environment with the dashboard and development extras:
+
+```powershell
+uv sync --locked --all-extras
+```
+
+You do not need to activate the environment. Run the project checks with:
+
+```powershell
+uv run --locked --all-extras ruff format --check .
+uv run --locked --all-extras ruff check .
+uv run --locked --all-extras pytest -q
+uv build
+```
+
+When intentionally updating dependencies, run `uv lock --upgrade`, review the
+lockfile diff, and rerun the checks. Do not edit `uv.lock` by hand.
+
+### Install with pip
+
+Eval remains a standard setuptools package for contributors and consumers who
+do not use uv. On Windows, use the virtual environment's interpreter explicitly:
 
 ```powershell
 py -3.12 -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install -e ".[dashboard,dev]"
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dashboard,dev]"
 ```
 
-The explicit interpreter paths prevent `py -3.12 -m pip` from accidentally
-installing into the registered global Python instead of this environment.
+Use `.\.venv\Scripts\python.exe -m pip install .` instead for a non-editable
+base installation without the dashboard or development tools.
+
+The uv lockfile does not constrain pip installations; pip resolves versions
+from the compatible ranges and pins declared in `pyproject.toml`.
 
 Key packages: `dash`, `dash-bootstrap-components`, `pandas`, `plotly`, `mido`, `rich`.
 
@@ -97,7 +122,8 @@ migration or cleanup.
 
 ### Direct Script Safeguard
 
-Running `py -3.12 -m conductor_eval.evaluator` directly is guarded because the
+Running `uv run --locked --all-extras python -m conductor_eval.evaluator`
+directly is guarded because the
 example in that file starts a broad cloud evaluation across multiple paid
 providers. The script prints a warning and requires the exact confirmation
 phrase `RUN CLOUD EVALUATION` before it creates an `Evaluator` or starts any
@@ -112,13 +138,15 @@ name explicitly.
 
 ```powershell
 # Interactive run selection
-.\.venv\Scripts\python.exe -m conductor_eval.analysis
+uv run --locked --all-extras python -m conductor_eval.analysis
 
 # Direct path to a run
-.\.venv\Scripts\python.exe -m conductor_eval.analysis "$HOME\.conductor\eval\evaluations\20260210_224954_arpeggiator_local"
+uv run --locked --all-extras python -m conductor_eval.analysis "$HOME\.conductor\eval\evaluations\20260210_224954_arpeggiator_local"
 ```
 
-The dashboard opens at `http://127.0.0.1:8050/`.
+The dashboard opens at `http://127.0.0.1:8050/`. Pip users can run the same
+module with `.\.venv\Scripts\python.exe` instead of the `uv run ... python`
+prefix.
 
 ---
 

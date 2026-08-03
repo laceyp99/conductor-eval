@@ -25,14 +25,16 @@ generation artifacts inside Eval.
 
 ## Validation
 
-Install a compatible `conductor-core`, then run:
+Sync the locked development environment, then run:
 
 ```powershell
-python -m ruff format --check .
-python -m ruff check .
-python -m pytest -q
-python -m build
+uv sync --locked --all-extras
+uv run --locked --all-extras ruff format --check .
+uv run --locked --all-extras ruff check .
+uv run --locked --all-extras pytest -q
+uv build
 ```
 
 Use deterministic tests for ordinary validation. Before a commit, inspect
-`git status` and the intended diff and keep generated evaluations uncommitted.
+`git status` and the intended diff, keep `uv.lock` synchronized with
+`pyproject.toml`, and keep generated evaluations uncommitted.
