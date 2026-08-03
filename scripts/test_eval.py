@@ -7,7 +7,7 @@ paid cloud-model matrix supported by :class:`conductor_eval.Evaluator`.
 Before running it:
     1. Install Conductor Eval and its dependencies.
     2. Start Ollama and make sure the models below are installed.
-    3. Run ``.\\.venv\\Scripts\\python.exe scripts\test_eval.py`` from the repo root.
+    3. Run ``uv run --locked --all-extras python scripts\test_eval.py`` from the repo root.
 
 Results are written beneath Eval's default
 ``~/.conductor/eval/evaluations/`` directory using the evaluator's timestamped
