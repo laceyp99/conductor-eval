@@ -131,6 +131,9 @@ class Evaluator:
     """
 
     SCALES = ["major", "minor"]
+    CLOUD_PROVIDERS = ("OpenAI", "Anthropic", "Google")
+    DEFAULT_PER_MODEL_CONCURRENCY = 5
+    DEFAULT_GLOBAL_CLOUD_CONCURRENCY = 25
 
     AVAILABLE_TESTS = {
         "scale": scale_test,
@@ -230,6 +233,9 @@ class Evaluator:
         tests: list[str] = ["scale", "duration"],
         test_reasoning: bool = False,
         test_params: dict[str, dict] | None = None,
+        rpm_overrides: dict[str, dict[str, int]] | None = None,
+        per_model_concurrency: int = DEFAULT_PER_MODEL_CONCURRENCY,
+        global_cloud_concurrency: int = DEFAULT_GLOBAL_CLOUD_CONCURRENCY,
     ) -> dict:
         """
         Run evaluation across all specified combinations.
@@ -244,6 +250,9 @@ class Evaluator:
             test_reasoning: If True, test all thinking modes and effort levels for compatible models.
             test_params: Explicit keyword arguments for named tests. Duration parameters override
                          prompt detection; omitted duration parameters still use keyword detection.
+            rpm_overrides: Optional provider/model RPM values for selected cloud models.
+            per_model_concurrency: Maximum in-flight requests for each cloud model.
+            global_cloud_concurrency: Maximum in-flight requests across all cloud models.
 
         Returns:
             dict: Summary of evaluation results.
@@ -261,13 +270,19 @@ class Evaluator:
         if isinstance(prompts, str):
             prompts = [prompts]
 
+        # Resolve every paid model and its limits before creating run output.
+        resolved_models = self._resolve_models(models)
+        rate_config, _ = self._resolve_rate_config(
+            resolved_models=resolved_models,
+            rpm_overrides=rpm_overrides,
+            per_model_concurrency=per_model_concurrency,
+            global_cloud_concurrency=global_cloud_concurrency,
+        )
+
         run_path, run_id, timestamp = self._create_run_directory(run_name)
         logger, handler = self._create_run_logger(run_path, run_id)
 
         try:
-            # Resolve models to (provider, model) tuples.
-            resolved_models = self._resolve_models(models, logger)
-
             # Save configuration
             config = {
                 "run_id": run_id,
@@ -281,6 +296,7 @@ class Evaluator:
                 "test_params": test_params,
                 "test_reasoning": test_reasoning,
                 "temperature": self.temperature,
+                "rate_limits": rate_config,
             }
             with open(run_path / "config.json", "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
@@ -518,9 +534,100 @@ class Evaluator:
             validated[test_name] = dict(params)
         return validated
 
-    def _resolve_models(
-        self, models: Union[str, list[str]], logger: logging.Logger
-    ) -> list[tuple[str, str]]:
+    @staticmethod
+    def _validate_positive_integer(value: object, name: str) -> int:
+        """Return a strict positive integer or raise a configuration error."""
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+        return value
+
+    def _resolve_rate_config(
+        self,
+        resolved_models: list[tuple[str, str]],
+        rpm_overrides: dict[str, dict[str, int]] | None,
+        per_model_concurrency: int,
+        global_cloud_concurrency: int,
+    ) -> tuple[dict, dict[tuple[str, str], int]]:
+        """Validate run limits and record effective RPM provenance."""
+        per_model_concurrency = self._validate_positive_integer(
+            per_model_concurrency, "per_model_concurrency"
+        )
+        global_cloud_concurrency = self._validate_positive_integer(
+            global_cloud_concurrency, "global_cloud_concurrency"
+        )
+
+        if rpm_overrides is None:
+            rpm_overrides = {}
+        if not isinstance(rpm_overrides, dict):
+            raise ValueError("rpm_overrides must be a dictionary keyed by provider and model")
+
+        provider_names = {provider.lower(): provider for provider in self.CLOUD_PROVIDERS}
+        normalized_overrides: dict[str, dict[str, int]] = {}
+        for provider_key, model_overrides in rpm_overrides.items():
+            if not isinstance(provider_key, str) or provider_key.lower() not in provider_names:
+                raise ValueError(f"Unknown RPM override provider: {provider_key!r}")
+            provider = provider_names[provider_key.lower()]
+            if provider in normalized_overrides:
+                raise ValueError(f"Duplicate RPM override provider: {provider}")
+            if not isinstance(model_overrides, dict):
+                raise ValueError(f"rpm_overrides[{provider_key!r}] must be a dictionary")
+
+            normalized_overrides[provider] = {}
+            known_models = self.model_info["models"].get(provider, {})
+            for model, rpm in model_overrides.items():
+                if not isinstance(model, str) or model not in known_models:
+                    raise ValueError(f"Unknown RPM override model: {provider}/{model}")
+                normalized_overrides[provider][model] = self._validate_positive_integer(
+                    rpm, f"rpm_overrides[{provider!r}][{model!r}]"
+                )
+
+        selected_cloud_models = {
+            (provider, model)
+            for provider, model in resolved_models
+            if provider in self.CLOUD_PROVIDERS
+        }
+        for provider, model_overrides in normalized_overrides.items():
+            for model in model_overrides:
+                if (provider, model) not in selected_cloud_models:
+                    raise ValueError(f"RPM override targets unselected model: {provider}/{model}")
+
+        effective_rates: dict[tuple[str, str], int] = {}
+        model_limits = []
+        for provider, model in sorted(selected_cloud_models):
+            rate_limits = self.model_info["models"][provider][model].get("rate_limits", {})
+            baseline_rpm = rate_limits.get("RPM")
+            override_rpm = normalized_overrides.get(provider, {}).get(model)
+            if override_rpm is not None:
+                effective_rpm = override_rpm
+                source = "override"
+            else:
+                effective_rpm = self._validate_positive_integer(
+                    baseline_rpm, f"Core RPM metadata for {provider}/{model}"
+                )
+                source = "core"
+
+            effective_rates[(provider, model)] = effective_rpm
+            model_limits.append(
+                {
+                    "provider": provider,
+                    "model": model,
+                    "baseline_rpm": baseline_rpm,
+                    "override_rpm": override_rpm,
+                    "effective_rpm": effective_rpm,
+                    "source": source,
+                }
+            )
+
+        return (
+            {
+                "per_model_concurrency": per_model_concurrency,
+                "global_cloud_concurrency": global_cloud_concurrency,
+                "models": model_limits,
+            },
+            effective_rates,
+        )
+
+    def _resolve_models(self, models: Union[str, list[str]]) -> list[tuple[str, str]]:
         """
         Resolve model specification to (provider, model_name) tuples.
 
@@ -536,7 +643,7 @@ class Evaluator:
             models_lower = models.lower()
             if models_lower == "all":
                 # All cloud models from model_list.json
-                for provider in ["OpenAI", "Anthropic", "Google"]:
+                for provider in self.CLOUD_PROVIDERS:
                     if provider in self.model_info["models"]:
                         for model in self.model_info["models"][provider].keys():
                             resolved.append((provider, model))
@@ -571,6 +678,11 @@ class Evaluator:
                 provider = self._get_provider(model)
                 if provider:
                     resolved.append((provider, model))
+                else:
+                    raise ValueError(f"Unknown model: {model}")
+
+        else:
+            raise ValueError("models must be a model/provider name or a list of model names")
 
         return resolved
 
@@ -593,7 +705,7 @@ class Evaluator:
             str: Provider name or None if not found
         """
         # Check cloud providers first
-        for provider in ["OpenAI", "Anthropic", "Google"]:
+        for provider in self.CLOUD_PROVIDERS:
             if provider in self.model_info["models"]:
                 if model in self.model_info["models"][provider]:
                     return provider
@@ -613,7 +725,7 @@ class Evaluator:
         Returns:
             bool: True for cloud providers, False for Ollama
         """
-        return provider in ["OpenAI", "Anthropic", "Google"]
+        return provider in self.CLOUD_PROVIDERS
 
     def _get_model_capabilities(self, provider: str, model: str) -> dict:
         """

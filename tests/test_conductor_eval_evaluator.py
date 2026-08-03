@@ -92,10 +92,9 @@ def test_evaluations_keep_logs_and_artifacts_isolated_when_overlapping(monkeypat
         def now(cls, tz=None):
             return cls(2026, 7, 26, 12, 34, 56, 789012, tzinfo=tz)
 
-    def resolve_models(models, logger):
+    def resolve_models(models):
         resolution_barrier.wait(timeout=5)
         marker = threading.current_thread().name
-        logger.info("Resolving models for %s", marker)
         return [("Ollama", marker)]
 
     def generate_tasks(**kwargs):
@@ -177,22 +176,13 @@ def test_evaluations_keep_logs_and_artifacts_isolated_when_overlapping(monkeypat
         assert all(str(other_path) not in log_contents for other_path in other_paths)
 
 
-def test_failed_evaluation_retains_and_closes_its_run_log(monkeypatch, tmp_path):
+def test_model_resolution_failure_creates_no_run_output(monkeypatch, tmp_path):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
-    created_logger = None
-    created_handler = None
-    create_run_logger = evaluator._create_run_logger
 
-    def fail_resolution(models, logger):
+    def fail_resolution(models):
         raise RuntimeError("model resolution failed")
 
-    def track_run_logger(run_path, run_id):
-        nonlocal created_logger, created_handler
-        created_logger, created_handler = create_run_logger(run_path, run_id)
-        return created_logger, created_handler
-
     monkeypatch.setattr(evaluator, "_resolve_models", fail_resolution)
-    monkeypatch.setattr(evaluator, "_create_run_logger", track_run_logger)
 
     with pytest.raises(RuntimeError, match="model resolution failed"):
         evaluator.evaluate(
@@ -202,18 +192,7 @@ def test_failed_evaluation_retains_and_closes_its_run_log(monkeypatch, tmp_path)
             run_name="failure",
         )
 
-    run_path = next((tmp_path / "evaluations").iterdir())
-    log_contents = (run_path / "run.log").read_text(encoding="utf-8")
-
-    assert "Evaluation failed: run_path=" in log_contents
-    assert "error_type=RuntimeError" in log_contents
-    assert "Traceback:" in log_contents
-    assert "model resolution failed" not in log_contents
-    assert created_logger is not None
-    assert created_handler is not None
-    assert created_logger.name not in logging.Logger.manager.loggerDict
-    assert not created_logger.handlers
-    assert created_handler.stream is None
+    assert not (tmp_path / "evaluations").exists()
 
 
 class RecordingEngine:
@@ -722,6 +701,153 @@ def test_evaluate_rejects_unknown_checks_before_creating_run_directory(tmp_path)
         )
 
     assert not output_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("argument", "value"),
+    [
+        ("per_model_concurrency", True),
+        ("per_model_concurrency", 0),
+        ("per_model_concurrency", -1),
+        ("per_model_concurrency", 1.5),
+        ("per_model_concurrency", float("inf")),
+        ("global_cloud_concurrency", False),
+        ("global_cloud_concurrency", 0),
+        ("global_cloud_concurrency", -1),
+        ("global_cloud_concurrency", 2.5),
+        ("global_cloud_concurrency", "25"),
+    ],
+)
+def test_evaluate_rejects_invalid_concurrency_before_output(tmp_path, argument, value):
+    output_dir = tmp_path / "evaluations"
+    evaluator = Evaluator(output_dir=output_dir)
+
+    with pytest.raises(ValueError, match=rf"{argument} must be a positive integer"):
+        evaluator.evaluate(
+            prompts="melody",
+            roots=["C"],
+            models=[],
+            run_name="invalid-concurrency",
+            **{argument: value},
+        )
+
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize("rpm", [True, 0, -1, 1.5, float("nan"), "5"])
+def test_evaluate_rejects_invalid_rpm_override_before_output(tmp_path, rpm):
+    output_dir = tmp_path / "evaluations"
+    evaluator = Evaluator(output_dir=output_dir)
+    model = next(iter(evaluator.model_info["models"]["OpenAI"]))
+
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        evaluator.evaluate(
+            prompts="melody",
+            roots=["C"],
+            models=[model],
+            run_name="invalid-rpm",
+            rpm_overrides={"OpenAI": {model: rpm}},
+        )
+
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"Unknown": {}}, "Unknown RPM override provider"),
+        ({"OpenAI": {"not-a-model": 5}}, "Unknown RPM override model"),
+        ({"OpenAI": []}, "must be a dictionary"),
+        ({"OpenAI": {}, "openai": {}}, "Duplicate RPM override provider"),
+    ],
+)
+def test_evaluate_rejects_mistyped_rpm_overrides_before_output(tmp_path, overrides, message):
+    output_dir = tmp_path / "evaluations"
+    evaluator = Evaluator(output_dir=output_dir)
+
+    with pytest.raises(ValueError, match=message):
+        evaluator.evaluate(
+            prompts="melody",
+            roots=["C"],
+            models=[],
+            run_name="invalid-overrides",
+            rpm_overrides=overrides,
+        )
+
+    assert not output_dir.exists()
+
+
+def test_evaluate_rejects_unselected_rpm_override_before_output(tmp_path):
+    output_dir = tmp_path / "evaluations"
+    evaluator = Evaluator(output_dir=output_dir)
+    model = next(iter(evaluator.model_info["models"]["OpenAI"]))
+
+    with pytest.raises(ValueError, match="targets unselected model"):
+        evaluator.evaluate(
+            prompts="melody",
+            roots=["C"],
+            models=[],
+            run_name="unselected-override",
+            rpm_overrides={"OpenAI": {model: 5}},
+        )
+
+    assert not output_dir.exists()
+
+
+def test_evaluate_rejects_missing_core_rpm_before_output(tmp_path):
+    output_dir = tmp_path / "evaluations"
+    evaluator = Evaluator(output_dir=output_dir)
+    model = next(iter(evaluator.model_info["models"]["OpenAI"]))
+    evaluator.model_info["models"]["OpenAI"][model]["rate_limits"]["RPM"] = None
+
+    with pytest.raises(ValueError, match="Core RPM metadata.*must be a positive integer"):
+        evaluator.evaluate(
+            prompts="melody",
+            roots=["C"],
+            models=[model],
+            run_name="missing-rpm",
+        )
+
+    assert not output_dir.exists()
+
+
+def test_evaluate_records_effective_rate_precedence_and_concurrency(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    models = list(evaluator.model_info["models"]["OpenAI"])[:2]
+    override_model, baseline_model = models
+    baseline_rpm = evaluator.model_info["models"]["OpenAI"][baseline_model]["rate_limits"]["RPM"]
+    monkeypatch.setattr(evaluator, "_generate_tasks", lambda **kwargs: [])
+
+    evaluator.evaluate(
+        prompts="melody",
+        roots=["C"],
+        models=models,
+        run_name="effective-rates",
+        rpm_overrides={"openai": {override_model: 7}},
+        per_model_concurrency=3,
+        global_cloud_concurrency=8,
+    )
+
+    run_path = next((tmp_path / "evaluations").iterdir())
+    config = json.loads((run_path / "config.json").read_text(encoding="utf-8"))
+    rate_config = config["rate_limits"]
+    by_model = {entry["model"]: entry for entry in rate_config["models"]}
+
+    assert rate_config["per_model_concurrency"] == 3
+    assert rate_config["global_cloud_concurrency"] == 8
+    assert by_model[override_model] == {
+        "provider": "OpenAI",
+        "model": override_model,
+        "baseline_rpm": evaluator.model_info["models"]["OpenAI"][override_model]["rate_limits"][
+            "RPM"
+        ],
+        "override_rpm": 7,
+        "effective_rpm": 7,
+        "source": "override",
+    }
+    assert by_model[baseline_model]["override_rpm"] is None
+    assert by_model[baseline_model]["effective_rpm"] == baseline_rpm
+    assert by_model[baseline_model]["source"] == "core"
 
 
 def test_summary_preserves_unknown_costs_and_excludes_failed_latency(tmp_path):
