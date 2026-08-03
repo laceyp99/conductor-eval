@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import threading
@@ -10,6 +11,72 @@ from mido import Message, MidiFile
 
 import conductor_eval.evaluator as evaluator_module
 from conductor_eval import EvalEngineAdapter, Evaluator
+
+
+class FakeSchedulerClock:
+    def __init__(self):
+        self.value = 0.0
+        self.lock = threading.Lock()
+
+    def monotonic(self):
+        with self.lock:
+            return self.value
+
+    async def sleep(self, delay):
+        self.advance(delay)
+        await asyncio.sleep(0)
+
+    def advance(self, amount):
+        with self.lock:
+            self.value += amount
+
+
+def scheduler_task(provider, model, index, variation_name="standard"):
+    return {
+        "provider": provider,
+        "model": model,
+        "original_prompt": f"prompt {index}",
+        "full_prompt": f"prompt {index} in C major",
+        "root": "C",
+        "scale": "major",
+        "use_thinking": variation_name != "standard",
+        "effort": None if variation_name == "standard" else variation_name,
+        "variation_name": variation_name,
+        "test_params": {},
+        "task_id": f"task-{provider.lower()}-{model}-{index}",
+    }
+
+
+def run_scheduler(
+    evaluator,
+    tmp_path,
+    tasks,
+    effective_rates,
+    per_model_concurrency=5,
+    global_cloud_concurrency=25,
+):
+    run_path = tmp_path / "scheduler-run"
+    run_path.mkdir()
+    manifest = evaluator._create_task_manifest(
+        run_id="scheduler-test",
+        tasks=tasks,
+        tests=["scale"],
+        effective_rates=effective_rates,
+    )
+    evaluator._write_manifest(run_path, manifest)
+    results = asyncio.run(
+        evaluator._run_async_batch(
+            tasks,
+            run_path,
+            ["scale"],
+            logging.Logger("scheduler-test"),
+            manifest,
+            effective_rates,
+            per_model_concurrency,
+            global_cloud_concurrency,
+        )
+    )
+    return results, manifest
 
 
 def test_texture_checks_are_available():
@@ -478,6 +545,240 @@ def test_manifest_updates_remain_atomic_json_during_transitions(tmp_path):
     assert not read_errors
     assert {entry["execution"]["state"] for entry in stored["tasks"]} == {"completed"}
     assert not (run_path / "task_manifest.json.tmp").exists()
+
+
+def test_scheduler_spaces_actual_model_starts_and_preserves_fifo(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    clock = FakeSchedulerClock()
+    evaluator._monotonic = clock.monotonic
+    evaluator._sleep = clock.sleep
+    tasks = [
+        scheduler_task("OpenAI", "shared-model", 1, "low"),
+        scheduler_task("OpenAI", "shared-model", 2, "medium"),
+        scheduler_task("OpenAI", "shared-model", 3, "high"),
+    ]
+    starts = []
+
+    def run_single(task, run_path, tests_to_run, logger, on_dispatch):
+        started_at = clock.monotonic()
+        starts.append((task["task_id"], started_at))
+        on_dispatch(started_at, f"wall-{started_at}")
+        return {
+            "provider": task["provider"],
+            "model": task["model"],
+            "metrics": {},
+            "tests": {"overall_pass": True},
+            "error": None,
+        }
+
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
+
+    run_scheduler(
+        evaluator,
+        tmp_path,
+        tasks,
+        {("OpenAI", "shared-model"): 5},
+    )
+
+    assert [task_id for task_id, _ in starts] == [task["task_id"] for task in tasks]
+    assert [started_at for _, started_at in starts] == [0.0, 12.0, 24.0]
+
+
+def test_scheduler_never_catches_up_missed_model_slots(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    clock = FakeSchedulerClock()
+    evaluator._monotonic = clock.monotonic
+    evaluator._sleep = clock.sleep
+    tasks = [scheduler_task("OpenAI", "slow-model", index) for index in range(3)]
+    starts = []
+
+    def run_single(task, run_path, tests_to_run, logger, on_dispatch):
+        started_at = clock.monotonic()
+        starts.append(started_at)
+        on_dispatch(started_at, f"wall-{started_at}")
+        if task is tasks[0]:
+            clock.advance(100.0)
+        return {
+            "provider": task["provider"],
+            "model": task["model"],
+            "metrics": {},
+            "tests": {"overall_pass": True},
+            "error": None,
+        }
+
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
+
+    run_scheduler(
+        evaluator,
+        tmp_path,
+        tasks,
+        {("OpenAI", "slow-model"): 5},
+        per_model_concurrency=1,
+    )
+
+    assert starts == [0.0, 100.0, 112.0]
+
+
+def test_scheduler_starts_different_model_queues_independently(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    clock = FakeSchedulerClock()
+    evaluator._monotonic = clock.monotonic
+    evaluator._sleep = clock.sleep
+    tasks = [
+        scheduler_task("OpenAI", "model-a", 1),
+        scheduler_task("OpenAI", "model-b", 1),
+    ]
+    starts = {}
+
+    def run_single(task, run_path, tests_to_run, logger, on_dispatch):
+        started_at = clock.monotonic()
+        starts[task["model"]] = started_at
+        on_dispatch(started_at, f"wall-{started_at}")
+        return {
+            "provider": task["provider"],
+            "model": task["model"],
+            "metrics": {},
+            "tests": {"overall_pass": True},
+            "error": None,
+        }
+
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
+
+    run_scheduler(
+        evaluator,
+        tmp_path,
+        tasks,
+        {("OpenAI", "model-a"): 5, ("OpenAI", "model-b"): 5},
+        global_cloud_concurrency=2,
+    )
+
+    assert starts == {"model-a": 0.0, "model-b": 0.0}
+
+
+def test_run_single_records_dispatch_immediately_before_core_generation(monkeypatch, tmp_path):
+    events = []
+
+    class RecordingAdapter:
+        def __init__(self, output_dir):
+            events.append("adapter-created")
+
+        def generate(self, **kwargs):
+            events.append("core-generation")
+            return MidiFile(), [], None
+
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    monkeypatch.setattr(evaluator_module, "EvalEngineAdapter", RecordingAdapter)
+    monkeypatch.setattr(
+        evaluator,
+        "run_tests",
+        lambda **kwargs: {"overall_pass": True, "overall_status": "passed"},
+    )
+    task = scheduler_task("OpenAI", "model-a", 1)
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+
+    evaluator._run_single(
+        task,
+        run_path,
+        ["scale"],
+        on_dispatch=lambda monotonic, wall: events.append("dispatch"),
+    )
+
+    assert events == ["adapter-created", "dispatch", "core-generation"]
+
+
+def test_scheduler_enforces_per_model_concurrency(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    clock = FakeSchedulerClock()
+    evaluator._monotonic = clock.monotonic
+    evaluator._sleep = clock.sleep
+    tasks = [scheduler_task("OpenAI", "busy-model", index) for index in range(8)]
+    lock = threading.Lock()
+    release = threading.Event()
+    active = 0
+    maximum_active = 0
+
+    def run_single(task, run_path, tests_to_run, logger, on_dispatch):
+        nonlocal active, maximum_active
+        started_at = clock.monotonic()
+        on_dispatch(started_at, f"wall-{started_at}")
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+            if active == 5:
+                release.set()
+        assert release.wait(timeout=5)
+        with lock:
+            active -= 1
+        return {
+            "provider": task["provider"],
+            "model": task["model"],
+            "metrics": {},
+            "tests": {"overall_pass": True},
+            "error": None,
+        }
+
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
+
+    run_scheduler(
+        evaluator,
+        tmp_path,
+        tasks,
+        {("OpenAI", "busy-model"): 600_000},
+        per_model_concurrency=5,
+        global_cloud_concurrency=8,
+    )
+
+    assert maximum_active == 5
+
+
+def test_scheduler_enforces_global_cloud_concurrency(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    clock = FakeSchedulerClock()
+    evaluator._monotonic = clock.monotonic
+    evaluator._sleep = clock.sleep
+    tasks = [
+        *(scheduler_task("OpenAI", "model-a", index) for index in range(5)),
+        *(scheduler_task("Anthropic", "model-b", index) for index in range(5)),
+    ]
+    rates = {("OpenAI", "model-a"): 600_000, ("Anthropic", "model-b"): 600_000}
+    lock = threading.Lock()
+    release = threading.Event()
+    active = 0
+    maximum_active = 0
+
+    def run_single(task, run_path, tests_to_run, logger, on_dispatch):
+        nonlocal active, maximum_active
+        started_at = clock.monotonic()
+        on_dispatch(started_at, f"wall-{started_at}")
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+            if active == 3:
+                release.set()
+        assert release.wait(timeout=5)
+        with lock:
+            active -= 1
+        return {
+            "provider": task["provider"],
+            "model": task["model"],
+            "metrics": {},
+            "tests": {"overall_pass": True},
+            "error": None,
+        }
+
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
+
+    run_scheduler(
+        evaluator,
+        tmp_path,
+        tasks,
+        rates,
+        per_model_concurrency=5,
+        global_cloud_concurrency=3,
+    )
+
+    assert maximum_active == 3
 
 
 def test_save_results_uses_compact_task_directory_and_fails_on_collision(tmp_path):

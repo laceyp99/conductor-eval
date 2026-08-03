@@ -15,9 +15,11 @@ import logging
 import os
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import partial
 from pathlib import Path
-from typing import Union
+from typing import Callable, Union
 from uuid import uuid4
 
 from conductor_core import EngineConfig, GenerationRequest, LoopGenerationEngine
@@ -195,6 +197,8 @@ class Evaluator:
         self.temperature = temperature
         self.console = Console(force_terminal=True)
         self.model_info = get_model_info()
+        self._monotonic = time.monotonic
+        self._sleep = asyncio.sleep
 
     @staticmethod
     def _create_run_logger(run_path: Path, run_id: str) -> tuple[logging.Logger, logging.Handler]:
@@ -329,7 +333,16 @@ class Evaluator:
             # Run async tasks (cloud providers)
             if async_tasks:
                 async_results = asyncio.run(
-                    self._run_async_batch(async_tasks, run_path, tests, logger, manifest)
+                    self._run_async_batch(
+                        async_tasks,
+                        run_path,
+                        tests,
+                        logger,
+                        manifest,
+                        effective_rates,
+                        rate_config["per_model_concurrency"],
+                        rate_config["global_cloud_concurrency"],
+                    )
                 )
                 all_results.extend(async_results)
 
@@ -1037,34 +1050,19 @@ class Evaluator:
         tests_to_run: list[str],
         logger: logging.Logger,
         manifest: dict,
+        effective_rates: dict[tuple[str, str], int],
+        per_model_concurrency: int,
+        global_cloud_concurrency: int,
     ) -> list[dict]:
-        """
-        Run tasks asynchronously with rate limiting.
-
-        Args:
-            tasks: List of task dictionaries
-            run_path: Path to save results
-            tests_to_run: List of test names to run
-
-        Returns:
-            list: List of result dictionaries
-        """
-        # Build semaphores from RPM
-        semaphores = {}
-        for provider in ["OpenAI", "Anthropic", "Google"]:
-            if provider in self.model_info["models"]:
-                rpms = []
-                for model in self.model_info["models"][provider].keys():
-                    rate_info = self.model_info["models"][provider][model].get("rate_limits", {})
-                    rpm = rate_info.get("RPM", 60)
-                    rpms.append(rpm)
-                max_concurrent = max(1, min(rpms) // 60) if rpms else 1
-                semaphores[provider] = asyncio.Semaphore(max_concurrent)
-
-        results = []
+        """Run independent FIFO model queues with paced request starts."""
+        results: list[dict] = []
         total_tasks = len(tasks)
+        loop = asyncio.get_running_loop()
+        global_semaphore = asyncio.Semaphore(global_cloud_concurrency)
+        model_queues: dict[tuple[str, str], list[dict]] = {}
+        for task in tasks:
+            model_queues.setdefault((task["provider"], task["model"]), []).append(task)
 
-        # Create live table for progress
         table = Table(title="Evaluation Progress")
         table.add_column("Provider")
         table.add_column("Model")
@@ -1074,95 +1072,164 @@ class Evaluator:
         table.add_column("Avg Latency")
         table.add_column("Avg Cost")
 
-        async def run_single_task(task: dict) -> dict:
-            provider = task["provider"]
-            async with semaphores.get(provider, asyncio.Semaphore(1)):
-                self._transition_manifest_task(
-                    run_path,
-                    manifest,
-                    task["task_id"],
-                    "dispatched",
-                    dispatched_at=datetime.now().astimezone().isoformat(),
+        def update_progress(live: Live) -> None:
+            new_table = Table(title=f"Evaluation Progress ({len(results)}/{total_tasks})")
+            new_table.add_column("Provider")
+            new_table.add_column("Model")
+            new_table.add_column("Eligible")
+            new_table.add_column("Pass Rate")
+            new_table.add_column("Avg Latency")
+            new_table.add_column("Avg Cost")
+
+            stats = {}
+            for result in results:
+                key = (result["provider"], result["model"])
+                model_stats = stats.setdefault(
+                    key,
+                    {
+                        "eligible": 0,
+                        "passed": 0,
+                        "latency_sum": 0.0,
+                        "latency_count": 0,
+                        "cost_sum": 0.0,
+                        "cost_count": 0,
+                    },
                 )
-                result = await asyncio.to_thread(
+                test_results = result.get("tests", {})
+                if self._is_overall_eligible(test_results):
+                    model_stats["eligible"] += 1
+                if test_results.get("overall_pass", False):
+                    model_stats["passed"] += 1
+                latency = result.get("metrics", {}).get("api_latency")
+                if latency is not None:
+                    model_stats["latency_sum"] += latency
+                    model_stats["latency_count"] += 1
+                cost = result.get("metrics", {}).get("cost")
+                if cost is not None:
+                    model_stats["cost_sum"] += cost
+                    model_stats["cost_count"] += 1
+
+            for (provider, model), model_stats in stats.items():
+                eligible = model_stats["eligible"]
+                pass_rate = model_stats["passed"] / eligible * 100 if eligible else 0
+                latency_count = model_stats["latency_count"]
+                avg_latency = model_stats["latency_sum"] / latency_count if latency_count else None
+                cost_count = model_stats["cost_count"]
+                avg_cost = model_stats["cost_sum"] / cost_count if cost_count else None
+                new_table.add_row(
+                    provider,
+                    model,
+                    str(eligible),
+                    f"{pass_rate:.1f}%",
+                    f"{avg_latency:.2f}s" if avg_latency is not None else "N/A",
+                    f"${avg_cost:.4f}" if avg_cost is not None else "N/A",
+                )
+
+            live.update(new_table)
+
+        async def admit_task(
+            task: dict, executor: ThreadPoolExecutor, live: Live
+        ) -> tuple[float, asyncio.Task]:
+            await global_semaphore.acquire()
+            started = loop.create_future()
+
+            def record_dispatch(monotonic_time: float, wall_time: str) -> None:
+                def resolve_start() -> None:
+                    if not started.done():
+                        started.set_result((monotonic_time, wall_time))
+
+                loop.call_soon_threadsafe(resolve_start)
+
+            result_future = loop.run_in_executor(
+                executor,
+                partial(
                     self._run_single,
                     task=task,
                     run_path=run_path,
                     tests_to_run=tests_to_run,
                     logger=logger,
+                    on_dispatch=record_dispatch,
+                ),
+            )
+            done, _ = await asyncio.wait(
+                {started, result_future}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if started in done:
+                started_at, dispatched_at = started.result()
+            else:
+                # A pre-dispatch setup failure still produced a generation result.
+                started.cancel()
+                started_at = self._monotonic()
+                dispatched_at = datetime.now().astimezone().isoformat()
+
+            self._transition_manifest_task(
+                run_path,
+                manifest,
+                task["task_id"],
+                "dispatched",
+                dispatched_at=dispatched_at,
+            )
+
+            async def finish_task() -> dict:
+                try:
+                    result = await result_future
+                    self._transition_manifest_task(
+                        run_path,
+                        manifest,
+                        task["task_id"],
+                        "failed" if result.get("error") else "completed",
+                        terminal_at=datetime.now().astimezone().isoformat(),
+                    )
+                    results.append(result)
+                    update_progress(live)
+                    return result
+                finally:
+                    global_semaphore.release()
+
+            return started_at, asyncio.create_task(finish_task())
+
+        async def run_model_queue(
+            key: tuple[str, str], queue: list[dict], executor: ThreadPoolExecutor, live: Live
+        ) -> None:
+            interval = 60.0 / effective_rates[key]
+            last_start: float | None = None
+            in_flight: set[asyncio.Task] = set()
+
+            for task in queue:
+                completed = {future for future in in_flight if future.done()}
+                if completed:
+                    await asyncio.gather(*completed)
+                    in_flight.difference_update(completed)
+                if len(in_flight) >= per_model_concurrency:
+                    completed, in_flight = await asyncio.wait(
+                        in_flight, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    await asyncio.gather(*completed)
+
+                if last_start is not None:
+                    delay = interval - (self._monotonic() - last_start)
+                    if delay > 0:
+                        await self._sleep(delay)
+
+                last_start, completion = await admit_task(task, executor, live)
+                in_flight.add(completion)
+
+            if in_flight:
+                await asyncio.gather(*in_flight)
+
+        with (
+            Live(table, console=self.console, refresh_per_second=2) as live,
+            ThreadPoolExecutor(
+                max_workers=global_cloud_concurrency,
+                thread_name_prefix="conductor-eval-cloud",
+            ) as executor,
+        ):
+            await asyncio.gather(
+                *(
+                    run_model_queue(key, queue, executor, live)
+                    for key, queue in model_queues.items()
                 )
-                self._transition_manifest_task(
-                    run_path,
-                    manifest,
-                    task["task_id"],
-                    "failed" if result.get("error") else "completed",
-                    terminal_at=datetime.now().astimezone().isoformat(),
-                )
-                return result
-
-        with Live(table, console=self.console, refresh_per_second=2) as live:
-            # Create all async tasks
-            async_tasks = [run_single_task(t) for t in tasks]
-
-            # Run with gathering and update progress
-            for coro in asyncio.as_completed(async_tasks):
-                result = await coro
-                results.append(result)
-
-                # Update table
-                new_table = Table(title=f"Evaluation Progress ({len(results)}/{total_tasks})")
-                new_table.add_column("Provider")
-                new_table.add_column("Model")
-                new_table.add_column("Eligible")
-                new_table.add_column("Pass Rate")
-                new_table.add_column("Avg Latency")
-                new_table.add_column("Avg Cost")
-
-                # Aggregate stats by model
-                stats = {}
-                for r in results:
-                    key = (r["provider"], r["model"])
-                    s = stats.setdefault(
-                        key,
-                        {
-                            "eligible": 0,
-                            "passed": 0,
-                            "latency_sum": 0.0,
-                            "latency_count": 0,
-                            "cost_sum": 0.0,
-                            "cost_count": 0,
-                        },
-                    )
-                    test_results = r.get("tests", {})
-                    if self._is_overall_eligible(test_results):
-                        s["eligible"] += 1
-                    if test_results.get("overall_pass", False):
-                        s["passed"] += 1
-                    latency = r.get("metrics", {}).get("api_latency")
-                    if latency is not None:
-                        s["latency_sum"] += latency
-                        s["latency_count"] += 1
-                    cost = r.get("metrics", {}).get("cost")
-                    if cost is not None:
-                        s["cost_sum"] += cost
-                        s["cost_count"] += 1
-
-                for (provider, model), s in stats.items():
-                    pass_rate = s["passed"] / s["eligible"] * 100 if s["eligible"] else 0
-                    avg_latency = (
-                        s["latency_sum"] / s["latency_count"] if s["latency_count"] else None
-                    )
-                    avg_cost = s["cost_sum"] / s["cost_count"] if s["cost_count"] else None
-                    new_table.add_row(
-                        provider,
-                        model,
-                        str(s["eligible"]),
-                        f"{pass_rate:.1f}%",
-                        f"{avg_latency:.2f}s" if avg_latency is not None else "N/A",
-                        f"${avg_cost:.4f}" if avg_cost is not None else "N/A",
-                    )
-
-                live.update(new_table)
+            )
 
         return results
 
@@ -1268,6 +1335,7 @@ class Evaluator:
         run_path: Path,
         tests_to_run: list[str],
         logger: logging.Logger | None = None,
+        on_dispatch: Callable[[float, str], None] | None = None,
     ) -> dict:
         """
         Run single generation, tests, and save results.
@@ -1317,8 +1385,15 @@ class Evaluator:
 
         # Generate MIDI
         start_time = time.perf_counter()
+        dispatch_recorded = False
         try:
             adapter = EvalEngineAdapter(run_path / "core_artifacts")
+            if on_dispatch is not None:
+                on_dispatch(
+                    self._monotonic(),
+                    datetime.now().astimezone().isoformat(),
+                )
+                dispatch_recorded = True
             midi_file, messages, cost = adapter.generate(
                 description=original_prompt,
                 key=root,
@@ -1335,6 +1410,11 @@ class Evaluator:
             result["metrics"]["cost"] = cost
             result["metrics"]["cost_available"] = cost is not None
         except Exception as e:
+            if on_dispatch is not None and not dispatch_recorded:
+                on_dispatch(
+                    self._monotonic(),
+                    datetime.now().astimezone().isoformat(),
+                )
             result["metrics"]["attempt_latency"] = time.perf_counter() - start_time
             logger.error(
                 "Task failed: task_id=%s provider=%s model=%s root=%s scale=%s variation=%s "
