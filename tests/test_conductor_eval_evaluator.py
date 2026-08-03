@@ -2,11 +2,12 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
-from conductor_core import GenerationRequest
+from conductor_core import GenerationRequest, ProviderRateLimitError
 from mido import Message, MidiFile
 
 import conductor_eval.evaluator as evaluator_module
@@ -779,6 +780,199 @@ def test_scheduler_enforces_global_cloud_concurrency(monkeypatch, tmp_path):
     )
 
     assert maximum_active == 3
+
+
+def test_run_single_preserves_typed_provider_rate_limit(monkeypatch, tmp_path):
+    class RateLimitedAdapter:
+        def __init__(self, output_dir):
+            pass
+
+        def generate(self, **kwargs):
+            raise ProviderRateLimitError("OpenAI", "account rate exceeded")
+
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    monkeypatch.setattr(evaluator_module, "EvalEngineAdapter", RateLimitedAdapter)
+    task = scheduler_task("OpenAI", "model-a", 1)
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+
+    result = evaluator._run_single(task, run_path, ["scale"])
+
+    assert result["error_type"] == "ProviderRateLimitError"
+    assert result["failure_kind"] == "provider_rate_limit"
+    assert result["tests"]["overall_status"] == "generation_error"
+    assert (run_path / "results" / task["task_id"] / "test_results.json").exists()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("timed out"),
+        ConnectionError("connection failed"),
+        ValueError("conversion failed"),
+        RuntimeError("response contained 429 text"),
+    ],
+)
+def test_run_single_does_not_misclassify_other_generation_errors(monkeypatch, tmp_path, error):
+    class FailingAdapter:
+        def __init__(self, output_dir):
+            pass
+
+        def generate(self, **kwargs):
+            raise error
+
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    monkeypatch.setattr(evaluator_module, "EvalEngineAdapter", FailingAdapter)
+    task = scheduler_task("OpenAI", "model-a", 1)
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+
+    result = evaluator._run_single(task, run_path, ["scale"])
+
+    assert result["error_type"] == type(error).__name__
+    assert result["failure_kind"] is None
+
+
+def test_typed_throttle_stops_only_affected_model_and_finishes_inflight(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    clock = FakeSchedulerClock()
+    evaluator._monotonic = clock.monotonic
+    evaluator._sleep = clock.sleep
+    model_a_tasks = [scheduler_task("OpenAI", "model-a", index) for index in range(6)]
+    model_b_tasks = [scheduler_task("OpenAI", "model-b", index) for index in range(3)]
+    tasks = [*model_a_tasks, *model_b_tasks]
+    rates = {("OpenAI", "model-a"): 600_000, ("OpenAI", "model-b"): 600_000}
+    admitted_a = threading.Barrier(3)
+    throttle_returned = threading.Event()
+
+    def run_single(task, run_path, tests_to_run, logger, on_dispatch):
+        started_at = clock.monotonic()
+        on_dispatch(started_at, f"wall-{started_at}")
+        result_dir = run_path / "results" / task["task_id"]
+        result_dir.mkdir(parents=True)
+
+        if task["model"] == "model-a":
+            admitted_a.wait(timeout=5)
+            if task is model_a_tasks[0]:
+                throttle_returned.set()
+                return {
+                    "provider": task["provider"],
+                    "model": task["model"],
+                    "root": task["root"],
+                    "scale": task["scale"],
+                    "metrics": {},
+                    "tests": {
+                        "overall_pass": False,
+                        "overall_status": "generation_error",
+                    },
+                    "error": "account rate exceeded",
+                    "error_type": "ProviderRateLimitError",
+                    "failure_kind": "provider_rate_limit",
+                }
+            assert throttle_returned.wait(timeout=5)
+            time.sleep(0.05)
+
+        return {
+            "provider": task["provider"],
+            "model": task["model"],
+            "root": task["root"],
+            "scale": task["scale"],
+            "metrics": {},
+            "tests": {"overall_pass": True, "overall_status": "passed"},
+            "error": None,
+            "error_type": None,
+            "failure_kind": None,
+        }
+
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
+
+    results, manifest = run_scheduler(
+        evaluator,
+        tmp_path,
+        tasks,
+        rates,
+        per_model_concurrency=3,
+        global_cloud_concurrency=6,
+    )
+
+    a_results = [result for result in results if result["model"] == "model-a"]
+    b_results = [result for result in results if result["model"] == "model-b"]
+    a_manifest = [entry for entry in manifest["tasks"] if entry["spec"]["model"] == "model-a"]
+    b_manifest = [entry for entry in manifest["tasks"] if entry["spec"]["model"] == "model-b"]
+
+    assert len(a_results) == 3
+    assert len(b_results) == 3
+    assert [entry["execution"]["state"] for entry in a_manifest].count("throttled") == 1
+    assert [entry["execution"]["state"] for entry in a_manifest].count("completed") == 2
+    assert [entry["execution"]["state"] for entry in a_manifest].count(
+        "unstarted_due_to_throttling"
+    ) == 3
+    assert {entry["execution"]["state"] for entry in b_manifest} == {"completed"}
+    assert {
+        entry["execution"]["throttle_task_id"]
+        for entry in a_manifest
+        if entry["execution"]["state"] == "unstarted_due_to_throttling"
+    } == {model_a_tasks[0]["task_id"]}
+    assert all(
+        not (tmp_path / "scheduler-run" / "results" / task["task_id"]).exists()
+        for task in model_a_tasks[3:]
+    )
+
+    summary = evaluator._generate_summary(results, {"run_id": "throttle-test"}, manifest)
+    assert summary["totals"]["planned_tasks"] == 9
+    assert summary["totals"]["dispatched_tasks"] == 6
+    assert summary["totals"]["completed_tasks"] == 5
+    assert summary["totals"]["generation_failure_tasks"] == 0
+    assert summary["totals"]["throttled_generation_tasks"] == 1
+    assert summary["totals"]["unstarted_due_to_throttling_tasks"] == 3
+    assert summary["totals"]["failed_generations"] == 1
+    assert summary["totals"]["throttled_generations"] == 1
+    assert summary["totals"]["eligible_generations"] == 5
+    assert summary["totals"]["overall_pass_rate"] == 1.0
+
+
+def test_error_text_containing_429_does_not_stop_model_queue(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    clock = FakeSchedulerClock()
+    evaluator._monotonic = clock.monotonic
+    evaluator._sleep = clock.sleep
+    tasks = [scheduler_task("OpenAI", "model-a", index) for index in range(3)]
+
+    def run_single(task, run_path, tests_to_run, logger, on_dispatch):
+        started_at = clock.monotonic()
+        on_dispatch(started_at, f"wall-{started_at}")
+        is_first = task is tasks[0]
+        return {
+            "provider": task["provider"],
+            "model": task["model"],
+            "root": task["root"],
+            "scale": task["scale"],
+            "metrics": {},
+            "tests": {
+                "overall_pass": not is_first,
+                "overall_status": "generation_error" if is_first else "passed",
+            },
+            "error": "provider returned 429-like text" if is_first else None,
+            "error_type": "RuntimeError" if is_first else None,
+            "failure_kind": None,
+        }
+
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
+
+    results, manifest = run_scheduler(
+        evaluator,
+        tmp_path,
+        tasks,
+        {("OpenAI", "model-a"): 600_000},
+        per_model_concurrency=1,
+    )
+
+    assert len(results) == 3
+    assert [entry["execution"]["state"] for entry in manifest["tasks"]] == [
+        "failed",
+        "completed",
+        "completed",
+    ]
 
 
 def test_save_results_uses_compact_task_directory_and_fails_on_collision(tmp_path):

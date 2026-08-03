@@ -22,7 +22,12 @@ from pathlib import Path
 from typing import Callable, Union
 from uuid import uuid4
 
-from conductor_core import EngineConfig, GenerationRequest, LoopGenerationEngine
+from conductor_core import (
+    EngineConfig,
+    GenerationRequest,
+    LoopGenerationEngine,
+    ProviderRateLimitError,
+)
 from conductor_core.music import DURATION_KEYWORDS, get_model_info
 from conductor_core.providers import ollama as ollama_api
 from mido import MidiFile
@@ -352,7 +357,7 @@ class Evaluator:
                 all_results.extend(sync_results)
 
             # Generate and save summary
-            summary = self._generate_summary(all_results, config)
+            summary = self._generate_summary(all_results, config, manifest)
             with open(run_path / "summary.json", "w", encoding="utf-8") as f:
                 json.dump(summary, f, indent=2)
 
@@ -1043,6 +1048,31 @@ class Evaluator:
         execution.update(updates)
         self._write_manifest(run_path, manifest)
 
+    def _mark_manifest_tasks_unstarted(
+        self,
+        run_path: Path,
+        manifest: dict,
+        tasks: list[dict],
+        throttle_task_id: str,
+    ) -> None:
+        """Atomically stop queued tasks linked to a model throttle."""
+        task_ids = {task["task_id"] for task in tasks}
+        terminal_at = datetime.now().astimezone().isoformat()
+        changed = False
+        for manifest_task in manifest["tasks"]:
+            execution = manifest_task["execution"]
+            if manifest_task["task_id"] in task_ids and execution["state"] == "queued":
+                execution.update(
+                    {
+                        "state": "unstarted_due_to_throttling",
+                        "terminal_at": terminal_at,
+                        "throttle_task_id": throttle_task_id,
+                    }
+                )
+                changed = True
+        if changed:
+            self._write_manifest(run_path, manifest)
+
     async def _run_async_batch(
         self,
         tasks: list[dict],
@@ -1059,6 +1089,7 @@ class Evaluator:
         total_tasks = len(tasks)
         loop = asyncio.get_running_loop()
         global_semaphore = asyncio.Semaphore(global_cloud_concurrency)
+        throttled_models: dict[tuple[str, str], str] = {}
         model_queues: dict[tuple[str, str], list[dict]] = {}
         for task in tasks:
             model_queues.setdefault((task["provider"], task["model"]), []).append(task)
@@ -1128,9 +1159,12 @@ class Evaluator:
             live.update(new_table)
 
         async def admit_task(
-            task: dict, executor: ThreadPoolExecutor, live: Live
-        ) -> tuple[float, asyncio.Task]:
+            key: tuple[str, str], task: dict, executor: ThreadPoolExecutor, live: Live
+        ) -> tuple[float, asyncio.Task] | None:
             await global_semaphore.acquire()
+            if key in throttled_models:
+                global_semaphore.release()
+                return None
             started = loop.create_future()
 
             def record_dispatch(monotonic_time: float, wall_time: str) -> None:
@@ -1173,11 +1207,18 @@ class Evaluator:
             async def finish_task() -> dict:
                 try:
                     result = await result_future
+                    is_throttled = result.get("failure_kind") == "provider_rate_limit"
+                    if is_throttled:
+                        throttled_models.setdefault(key, task["task_id"])
                     self._transition_manifest_task(
                         run_path,
                         manifest,
                         task["task_id"],
-                        "failed" if result.get("error") else "completed",
+                        "throttled"
+                        if is_throttled
+                        else "failed"
+                        if result.get("error")
+                        else "completed",
                         terminal_at=datetime.now().astimezone().isoformat(),
                     )
                     results.append(result)
@@ -1195,7 +1236,7 @@ class Evaluator:
             last_start: float | None = None
             in_flight: set[asyncio.Task] = set()
 
-            for task in queue:
+            for index, task in enumerate(queue):
                 completed = {future for future in in_flight if future.done()}
                 if completed:
                     await asyncio.gather(*completed)
@@ -1206,12 +1247,29 @@ class Evaluator:
                     )
                     await asyncio.gather(*completed)
 
+                if key in throttled_models:
+                    self._mark_manifest_tasks_unstarted(
+                        run_path, manifest, queue[index:], throttled_models[key]
+                    )
+                    break
+
                 if last_start is not None:
                     delay = interval - (self._monotonic() - last_start)
                     if delay > 0:
                         await self._sleep(delay)
+                    if key in throttled_models:
+                        self._mark_manifest_tasks_unstarted(
+                            run_path, manifest, queue[index:], throttled_models[key]
+                        )
+                        break
 
-                last_start, completion = await admit_task(task, executor, live)
+                admission = await admit_task(key, task, executor, live)
+                if admission is None:
+                    self._mark_manifest_tasks_unstarted(
+                        run_path, manifest, queue[index:], throttled_models[key]
+                    )
+                    break
+                last_start, completion = admission
                 in_flight.add(completion)
 
             if in_flight:
@@ -1380,6 +1438,8 @@ class Evaluator:
             },
             "tests": {},
             "error": None,
+            "error_type": None,
+            "failure_kind": None,
         }
         logger = logger or logging.Logger(__name__)
 
@@ -1429,6 +1489,9 @@ class Evaluator:
                 self._format_traceback(e),
             )
             result["error"] = str(e)
+            result["error_type"] = type(e).__name__
+            if isinstance(e, ProviderRateLimitError):
+                result["failure_kind"] = "provider_rate_limit"
             result["tests"]["overall_pass"] = False
             result["tests"]["overall_status"] = "generation_error"
             # Still save the result even on failure
@@ -1487,7 +1550,9 @@ class Evaluator:
         with open(results_path, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2)
 
-    def _generate_summary(self, all_results: list[dict], config: dict) -> dict:
+    def _generate_summary(
+        self, all_results: list[dict], config: dict, manifest: dict | None = None
+    ) -> dict:
         """
         Aggregate results into summary statistics.
 
@@ -1498,14 +1563,45 @@ class Evaluator:
         Returns:
             dict: Summary with aggregated statistics
         """
+        if manifest is None:
+            planned_tasks = len(all_results)
+            dispatched_tasks = len(all_results)
+            completed_tasks = sum(not result.get("error") for result in all_results)
+            generation_failure_tasks = sum(
+                bool(result.get("error")) and result.get("failure_kind") != "provider_rate_limit"
+                for result in all_results
+            )
+            throttled_generation_tasks = sum(
+                result.get("failure_kind") == "provider_rate_limit" for result in all_results
+            )
+            unstarted_tasks = 0
+        else:
+            execution_states = [task["execution"]["state"] for task in manifest.get("tasks", [])]
+            planned_tasks = len(execution_states)
+            dispatched_tasks = sum(
+                state in {"dispatched", "completed", "failed", "throttled"}
+                for state in execution_states
+            )
+            completed_tasks = execution_states.count("completed")
+            generation_failure_tasks = execution_states.count("failed")
+            throttled_generation_tasks = execution_states.count("throttled")
+            unstarted_tasks = execution_states.count("unstarted_due_to_throttling")
+
         summary = {
             "run_id": config["run_id"],
             "config": config,
             "totals": {
                 "total_generations": len(all_results),
+                "planned_tasks": planned_tasks,
+                "dispatched_tasks": dispatched_tasks,
+                "completed_tasks": completed_tasks,
+                "generation_failure_tasks": generation_failure_tasks,
+                "throttled_generation_tasks": throttled_generation_tasks,
+                "unstarted_due_to_throttling_tasks": unstarted_tasks,
                 "successful_generations": 0,
                 "failed_generations": 0,
                 "generation_error_generations": 0,
+                "throttled_generations": 0,
                 "check_error_generations": 0,
                 "validation_failed_generations": 0,
                 "ineligible_generations": 0,
@@ -1527,7 +1623,10 @@ class Evaluator:
 
         for r in all_results:
             tests = r.get("tests", {})
-            if r.get("error"):
+            is_throttled = r.get("failure_kind") == "provider_rate_limit"
+            if is_throttled:
+                outcome = "throttled"
+            elif r.get("error"):
                 outcome = "generation_error"
             else:
                 outcome = tests.get(
@@ -1538,6 +1637,8 @@ class Evaluator:
             if r.get("error"):
                 summary["totals"]["failed_generations"] += 1
                 summary["totals"]["generation_error_generations"] += 1
+                if is_throttled:
+                    summary["totals"]["throttled_generations"] += 1
             else:
                 summary["totals"]["successful_generations"] += 1
 
@@ -1578,6 +1679,7 @@ class Evaluator:
                     "passed": 0,
                     "failed": 0,
                     "generation_errors": 0,
+                    "throttled_generations": 0,
                     "check_errors": 0,
                     "validation_failed": 0,
                     "ineligible": 0,
@@ -1597,6 +1699,8 @@ class Evaluator:
             if r.get("error"):
                 m["failed"] += 1
                 m["generation_errors"] += 1
+                if is_throttled:
+                    m["throttled_generations"] += 1
             elif outcome == "failed":
                 m["validation_failed"] += 1
             elif outcome == "ineligible":
@@ -1622,6 +1726,7 @@ class Evaluator:
                     "passed": 0,
                     "validation_failed": 0,
                     "generation_errors": 0,
+                    "throttled_generations": 0,
                     "check_errors": 0,
                     "ineligible": 0,
                     "eligible": 0,
@@ -1634,6 +1739,9 @@ class Evaluator:
                 summary["by_root"][root]["validation_failed"] += 1
             elif outcome == "generation_error":
                 summary["by_root"][root]["generation_errors"] += 1
+            elif outcome == "throttled":
+                summary["by_root"][root]["generation_errors"] += 1
+                summary["by_root"][root]["throttled_generations"] += 1
             elif outcome == "ineligible":
                 summary["by_root"][root]["ineligible"] += 1
             elif outcome == "check_error":
@@ -1649,6 +1757,7 @@ class Evaluator:
                     "passed": 0,
                     "validation_failed": 0,
                     "generation_errors": 0,
+                    "throttled_generations": 0,
                     "check_errors": 0,
                     "ineligible": 0,
                     "eligible": 0,
@@ -1661,6 +1770,9 @@ class Evaluator:
                 summary["by_scale"][scale]["validation_failed"] += 1
             elif outcome == "generation_error":
                 summary["by_scale"][scale]["generation_errors"] += 1
+            elif outcome == "throttled":
+                summary["by_scale"][scale]["generation_errors"] += 1
+                summary["by_scale"][scale]["throttled_generations"] += 1
             elif outcome == "ineligible":
                 summary["by_scale"][scale]["ineligible"] += 1
             elif outcome == "check_error":
