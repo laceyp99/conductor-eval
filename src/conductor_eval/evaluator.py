@@ -1093,6 +1093,7 @@ class Evaluator:
         model_queues: dict[tuple[str, str], list[dict]] = {}
         for task in tasks:
             model_queues.setdefault((task["provider"], task["model"]), []).append(task)
+        throttle_events = {key: asyncio.Event() for key in model_queues}
 
         table = Table(title="Evaluation Progress")
         table.add_column("Provider")
@@ -1210,6 +1211,7 @@ class Evaluator:
                     is_throttled = result.get("failure_kind") == "provider_rate_limit"
                     if is_throttled:
                         throttled_models.setdefault(key, task["task_id"])
+                        throttle_events[key].set()
                     self._transition_manifest_task(
                         run_path,
                         manifest,
@@ -1256,7 +1258,25 @@ class Evaluator:
                 if last_start is not None:
                     delay = interval - (self._monotonic() - last_start)
                     if delay > 0:
-                        await self._sleep(delay)
+                        pacing_timer = asyncio.create_task(self._sleep(delay))
+                        throttle_wait = asyncio.create_task(throttle_events[key].wait())
+                        try:
+                            completed, _ = await asyncio.wait(
+                                {pacing_timer, throttle_wait},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            throttle_won = throttle_wait in completed and throttle_wait.result()
+                            if not throttle_won:
+                                pacing_timer.result()
+                        finally:
+                            for pending in (pacing_timer, throttle_wait):
+                                if not pending.done():
+                                    pending.cancel()
+                            await asyncio.gather(
+                                pacing_timer,
+                                throttle_wait,
+                                return_exceptions=True,
+                            )
                     if key in throttled_models:
                         self._mark_manifest_tasks_unstarted(
                             run_path, manifest, queue[index:], throttled_models[key]

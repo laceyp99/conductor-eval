@@ -931,6 +931,56 @@ def test_typed_throttle_stops_only_affected_model_and_finishes_inflight(monkeypa
     assert summary["totals"]["overall_pass_rate"] == 1.0
 
 
+def test_typed_throttle_interrupts_model_pacing_wait(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    pacing_started = threading.Event()
+    pacing_cancelled = threading.Event()
+    tasks = [scheduler_task("OpenAI", "model-a", index) for index in range(2)]
+
+    async def blocked_pacing_sleep(delay):
+        assert delay > 0
+        pacing_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pacing_cancelled.set()
+            raise
+
+    def run_single(task, run_path, tests_to_run, logger, on_dispatch):
+        on_dispatch(0.0, "wall-0.0")
+        assert pacing_started.wait(timeout=5)
+        return {
+            "provider": task["provider"],
+            "model": task["model"],
+            "root": task["root"],
+            "scale": task["scale"],
+            "metrics": {},
+            "tests": {"overall_pass": False, "overall_status": "generation_error"},
+            "error": "account rate exceeded",
+            "error_type": "ProviderRateLimitError",
+            "failure_kind": "provider_rate_limit",
+        }
+
+    evaluator._monotonic = lambda: 0.0
+    evaluator._sleep = blocked_pacing_sleep
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
+
+    results, manifest = run_scheduler(
+        evaluator,
+        tmp_path,
+        tasks,
+        {("OpenAI", "model-a"): 1},
+        per_model_concurrency=2,
+    )
+
+    assert len(results) == 1
+    assert pacing_cancelled.is_set()
+    assert [entry["execution"]["state"] for entry in manifest["tasks"]] == [
+        "throttled",
+        "unstarted_due_to_throttling",
+    ]
+
+
 def test_error_text_containing_429_does_not_stop_model_queue(monkeypatch, tmp_path):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
     clock = FakeSchedulerClock()
