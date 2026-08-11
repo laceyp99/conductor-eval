@@ -425,12 +425,30 @@ def test_generate_tasks_qualifies_repeated_identical_tasks_with_occurrences(tmp_
 def test_complete_queued_manifest_exists_before_dispatch(monkeypatch, tmp_path):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations", temperature=0.25)
     monkeypatch.setattr(evaluator, "_resolve_models", lambda models: [("Ollama", "local-test")])
+    inspected_run_path = None
 
     def inspect_before_dispatch(tasks, run_path, tests_to_run, logger, manifest):
+        nonlocal inspected_run_path
+        inspected_run_path = run_path
         stored = json.loads((run_path / "task_manifest.json").read_text(encoding="utf-8"))
         assert stored == manifest
         assert len(stored["tasks"]) == len(tasks) == 2
         assert {entry["execution"]["state"] for entry in stored["tasks"]} == {"queued"}
+        for task in tasks:
+            evaluator._transition_manifest_task(
+                run_path,
+                manifest,
+                task["task_id"],
+                "dispatched",
+                dispatched_at="2026-08-02T12:00:00-04:00",
+            )
+            evaluator._transition_manifest_task(
+                run_path,
+                manifest,
+                task["task_id"],
+                "completed",
+                terminal_at="2026-08-02T12:00:01-04:00",
+            )
         return []
 
     monkeypatch.setattr(evaluator, "_run_sync_batch", inspect_before_dispatch)
@@ -441,6 +459,11 @@ def test_complete_queued_manifest_exists_before_dispatch(monkeypatch, tmp_path):
         models=[],
         run_name="manifest-before-dispatch",
     )
+
+    stored = json.loads((inspected_run_path / "task_manifest.json").read_text(encoding="utf-8"))
+    assert stored["last_event_sequence"] == 4
+    assert {entry["execution"]["state"] for entry in stored["tasks"]} == {"completed"}
+    assert (inspected_run_path / "task_events.jsonl").exists()
 
 
 def test_manifest_task_spec_is_complete_and_secret_free(monkeypatch, tmp_path):
@@ -464,6 +487,7 @@ def test_manifest_task_spec_is_complete_and_secret_free(monkeypatch, tmp_path):
     entry = manifest["tasks"][0]
 
     assert manifest["schema_version"] == 1
+    assert manifest["last_event_sequence"] == 0
     assert entry["task_id"] == tasks[0]["task_id"]
     assert entry["spec"] == {
         "provider": "OpenAI",
@@ -486,7 +510,7 @@ def test_manifest_task_spec_is_complete_and_secret_free(monkeypatch, tmp_path):
     assert "response" not in serialized
 
 
-def test_manifest_updates_remain_atomic_json_during_transitions(tmp_path):
+def test_manifest_journal_replays_transitions_and_compacts_final_snapshot(tmp_path):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
     run_path = tmp_path / "run"
     run_path.mkdir()
@@ -504,48 +528,94 @@ def test_manifest_updates_remain_atomic_json_during_transitions(tmp_path):
         effective_rates={("OpenAI", "gpt-test"): 5},
     )
     evaluator._write_manifest(run_path, manifest)
-    stop_reading = threading.Event()
-    read_errors = []
+    for task in tasks:
+        evaluator._transition_manifest_task(
+            run_path,
+            manifest,
+            task["task_id"],
+            "dispatched",
+            dispatched_at="2026-08-02T12:00:00-04:00",
+        )
+        evaluator._transition_manifest_task(
+            run_path,
+            manifest,
+            task["task_id"],
+            "completed",
+            terminal_at="2026-08-02T12:00:01-04:00",
+        )
 
-    def read_manifest_repeatedly():
-        while not stop_reading.is_set():
-            try:
-                json.loads((run_path / "task_manifest.json").read_text(encoding="utf-8"))
-            except PermissionError:
-                # Windows can briefly deny a reader during an atomic replace;
-                # retrying must never expose a partial JSON document.
-                continue
-            except Exception as error:
-                read_errors.append(error)
-                stop_reading.set()
+    baseline = json.loads((run_path / "task_manifest.json").read_text(encoding="utf-8"))
+    events = [
+        json.loads(line)
+        for line in (run_path / "task_events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    replayed = evaluator._load_task_manifest(run_path)
 
-    reader = threading.Thread(target=read_manifest_repeatedly)
-    reader.start()
-    try:
-        for task in tasks:
-            evaluator._transition_manifest_task(
-                run_path,
-                manifest,
-                task["task_id"],
-                "dispatched",
-                dispatched_at="2026-08-02T12:00:00-04:00",
-            )
-            evaluator._transition_manifest_task(
-                run_path,
-                manifest,
-                task["task_id"],
-                "completed",
-                terminal_at="2026-08-02T12:00:01-04:00",
-            )
-    finally:
-        stop_reading.set()
-        reader.join(timeout=5)
+    assert baseline["last_event_sequence"] == 0
+    assert {entry["execution"]["state"] for entry in baseline["tasks"]} == {"queued"}
+    assert len(events) == len(tasks) * 2
+    assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
+    assert replayed == manifest
+    assert {entry["execution"]["state"] for entry in replayed["tasks"]} == {"completed"}
 
+    evaluator._write_manifest(run_path, manifest)
     stored = json.loads((run_path / "task_manifest.json").read_text(encoding="utf-8"))
-    assert not reader.is_alive()
-    assert not read_errors
-    assert {entry["execution"]["state"] for entry in stored["tasks"]} == {"completed"}
+    assert stored == manifest
+    assert evaluator._load_task_manifest(run_path) == manifest
     assert not (run_path / "task_manifest.json.tmp").exists()
+
+
+def test_manifest_replay_ignores_crash_truncated_final_event(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+    tasks = [scheduler_task("OpenAI", "model-a", 1)]
+    manifest = evaluator._create_task_manifest(
+        run_id="truncated-event-test",
+        tasks=tasks,
+        tests=["scale"],
+        effective_rates={("OpenAI", "model-a"): 5},
+    )
+    evaluator._write_manifest(run_path, manifest)
+    evaluator._transition_manifest_task(
+        run_path,
+        manifest,
+        tasks[0]["task_id"],
+        "dispatched",
+        dispatched_at="2026-08-02T12:00:00-04:00",
+    )
+    with open(run_path / "task_events.jsonl", "a", encoding="utf-8") as file:
+        file.write('{"schema_version":1,"sequence":2')
+
+    replayed = evaluator._load_task_manifest(run_path)
+
+    assert replayed["last_event_sequence"] == 1
+    assert replayed["tasks"][0]["execution"]["state"] == "dispatched"
+
+
+def test_manifest_replay_rejects_non_contiguous_event_journal(tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+    tasks = [scheduler_task("OpenAI", "model-a", 1)]
+    manifest = evaluator._create_task_manifest(
+        run_id="event-gap-test",
+        tasks=tasks,
+        tests=["scale"],
+        effective_rates={("OpenAI", "model-a"): 5},
+    )
+    evaluator._write_manifest(run_path, manifest)
+    event = {
+        "schema_version": 1,
+        "sequence": 2,
+        "task_id": tasks[0]["task_id"],
+        "state": "dispatched",
+        "updates": {"dispatched_at": "2026-08-02T12:00:00-04:00"},
+    }
+    (run_path / "task_events.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Non-contiguous task event journal"):
+        evaluator._load_task_manifest(run_path)
 
 
 def test_scheduler_spaces_actual_model_starts_and_preserves_fifo(monkeypatch, tmp_path):

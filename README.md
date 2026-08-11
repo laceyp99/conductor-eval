@@ -301,7 +301,8 @@ directory (shown here with the default suite root):
 └── 20260210_224954_123456_my_first_eval-<hash>_<uuid16>/
     ├── run.log                        # Eval-owned lifecycle and error log
     ├── config.json                    # Full evaluation configuration
-    ├── task_manifest.json             # Immutable task specs + live execution state
+    ├── task_manifest.json             # Initial/final task-state snapshot
+    ├── task_events.jsonl              # Durable append-only execution journal
     ├── summary.json                   # Aggregated results + statistics
     ├── core_artifacts/                # Core-owned MIDI, messages, and metadata
     ├── analysis/                      # Created by dashboard export
@@ -380,11 +381,20 @@ Stores the full configuration used for the run:
 
 #### task_manifest.json
 
-The versioned manifest is written with every task in `queued` state before
-dispatch begins. Each entry separates an immutable `spec` (provider, model,
-prompts, musical inputs, reasoning settings, tests, temperature, and effective
-RPM) from mutable `execution` state. Meaningful state changes atomically replace
-the complete JSON file through one evaluator-owned write path.
+The versioned manifest is atomically written with every task in `queued` state
+before dispatch begins. Each entry separates an immutable `spec` (provider,
+model, prompts, musical inputs, reasoning settings, tests, temperature, and
+effective RPM) from mutable `execution` state.
+
+During execution, state changes are appended as compact, monotonically
+sequenced records in `task_events.jsonl`. Each append is flushed and synced to
+disk without rewriting every task specification. Readers materializing a live
+or interrupted run apply complete journal records newer than the manifest's
+`last_event_sequence`; an incomplete final line from an interrupted write is
+ignored. A successfully completed run atomically replaces `task_manifest.json`
+with the fully materialized final state. The journal is retained for recovery
+and auditing, and records already included in the final snapshot are skipped
+during replay.
 
 Execution states are `queued`, `dispatched`, `completed`, `failed`, `throttled`,
 and `unstarted_due_to_throttling`. Unstarted entries link to the triggering

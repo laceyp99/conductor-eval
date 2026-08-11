@@ -356,6 +356,9 @@ class Evaluator:
                 sync_results = self._run_sync_batch(sync_tasks, run_path, tests, logger, manifest)
                 all_results.extend(sync_results)
 
+            # Compact the durable event journal into the final manifest snapshot.
+            self._write_manifest(run_path, manifest)
+
             # Generate and save summary
             summary = self._generate_summary(all_results, config, manifest)
             with open(run_path / "summary.json", "w", encoding="utf-8") as f:
@@ -994,6 +997,7 @@ class Evaluator:
         return {
             "schema_version": 1,
             "run_id": run_id,
+            "last_event_sequence": 0,
             "tasks": manifest_tasks,
         }
 
@@ -1020,15 +1024,14 @@ class Evaluator:
         finally:
             temporary_path.unlink(missing_ok=True)
 
-    def _transition_manifest_task(
-        self,
-        run_path: Path,
+    @staticmethod
+    def _apply_manifest_transition(
         manifest: dict,
         task_id: str,
         state: str,
-        **updates: object,
+        updates: dict[str, object],
     ) -> None:
-        """Apply one serialized task-state transition and atomically persist it."""
+        """Validate and apply one task transition to an in-memory manifest."""
         manifest_task = next(
             (entry for entry in manifest["tasks"] if entry["task_id"] == task_id), None
         )
@@ -1046,7 +1049,120 @@ class Evaluator:
 
         execution["state"] = state
         execution.update(updates)
-        self._write_manifest(run_path, manifest)
+
+    @staticmethod
+    def _append_manifest_events(
+        run_path: Path,
+        manifest: dict,
+        transitions: list[tuple[str, str, dict[str, object]]],
+    ) -> None:
+        """Durably append task transitions without rewriting the full manifest."""
+        if not transitions:
+            return
+
+        sequence = manifest.get("last_event_sequence", 0)
+        serialized_events = []
+        for task_id, state, updates in transitions:
+            sequence += 1
+            serialized_events.append(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "sequence": sequence,
+                        "task_id": task_id,
+                        "state": state,
+                        "updates": updates,
+                    },
+                    separators=(",", ":"),
+                )
+            )
+
+        event_path = run_path / "task_events.jsonl"
+        with open(event_path, "a", encoding="utf-8", newline="\n") as file:
+            file.write("\n".join(serialized_events) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+        manifest["last_event_sequence"] = sequence
+
+    @classmethod
+    def _load_task_manifest(cls, run_path: Path) -> dict:
+        """Load a manifest snapshot and replay complete, newer journal events."""
+        manifest_path = run_path / "task_manifest.json"
+        with open(manifest_path, encoding="utf-8") as file:
+            manifest = json.load(file)
+
+        event_path = run_path / "task_events.jsonl"
+        if not event_path.exists():
+            return manifest
+
+        applied_sequence = manifest.get("last_event_sequence", 0)
+        if (
+            not isinstance(applied_sequence, int)
+            or isinstance(applied_sequence, bool)
+            or applied_sequence < 0
+        ):
+            raise ValueError("Invalid manifest last_event_sequence")
+        expected_sequence = applied_sequence + 1
+        journal_sequence = 0
+        with open(event_path, encoding="utf-8") as file:
+            for line_number, line in enumerate(file, start=1):
+                if not line.endswith("\n"):
+                    # A process can stop after writing only part of the final event.
+                    break
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(f"Invalid task event JSON on line {line_number}") from error
+                if event.get("schema_version") != 1:
+                    raise ValueError(f"Unsupported task event schema on line {line_number}")
+
+                sequence = event.get("sequence")
+                if not isinstance(sequence, int) or isinstance(sequence, bool):
+                    raise ValueError(f"Invalid task event sequence on line {line_number}")
+                if sequence != journal_sequence + 1:
+                    raise ValueError(
+                        f"Non-contiguous task event journal on line {line_number}: "
+                        f"expected {journal_sequence + 1}, found {sequence}"
+                    )
+                journal_sequence = sequence
+                if sequence <= applied_sequence:
+                    continue
+                if sequence != expected_sequence:
+                    raise ValueError(
+                        f"Non-contiguous task event sequence on line {line_number}: "
+                        f"expected {expected_sequence}, found {sequence}"
+                    )
+
+                updates = event.get("updates")
+                if not isinstance(updates, dict):
+                    raise ValueError(f"Invalid task event updates on line {line_number}")
+                task_id = event.get("task_id")
+                state = event.get("state")
+                if not isinstance(task_id, str) or not isinstance(state, str):
+                    raise ValueError(f"Invalid task event transition on line {line_number}")
+                cls._apply_manifest_transition(
+                    manifest,
+                    task_id,
+                    state,
+                    updates,
+                )
+                applied_sequence = sequence
+                expected_sequence += 1
+
+        manifest["last_event_sequence"] = applied_sequence
+        return manifest
+
+    def _transition_manifest_task(
+        self,
+        run_path: Path,
+        manifest: dict,
+        task_id: str,
+        state: str,
+        **updates: object,
+    ) -> None:
+        """Apply one task-state transition and append it to the event journal."""
+        self._apply_manifest_transition(manifest, task_id, state, updates)
+        self._append_manifest_events(run_path, manifest, [(task_id, state, updates)])
 
     def _mark_manifest_tasks_unstarted(
         self,
@@ -1055,23 +1171,26 @@ class Evaluator:
         tasks: list[dict],
         throttle_task_id: str,
     ) -> None:
-        """Atomically stop queued tasks linked to a model throttle."""
+        """Durably stop queued tasks linked to a model throttle."""
         task_ids = {task["task_id"] for task in tasks}
         terminal_at = datetime.now().astimezone().isoformat()
-        changed = False
+        transitions = []
         for manifest_task in manifest["tasks"]:
             execution = manifest_task["execution"]
             if manifest_task["task_id"] in task_ids and execution["state"] == "queued":
-                execution.update(
-                    {
-                        "state": "unstarted_due_to_throttling",
-                        "terminal_at": terminal_at,
-                        "throttle_task_id": throttle_task_id,
-                    }
+                task_id = manifest_task["task_id"]
+                updates = {
+                    "terminal_at": terminal_at,
+                    "throttle_task_id": throttle_task_id,
+                }
+                self._apply_manifest_transition(
+                    manifest,
+                    task_id,
+                    "unstarted_due_to_throttling",
+                    updates,
                 )
-                changed = True
-        if changed:
-            self._write_manifest(run_path, manifest)
+                transitions.append((task_id, "unstarted_due_to_throttling", updates))
+        self._append_manifest_events(run_path, manifest, transitions)
 
     async def _run_async_batch(
         self,
