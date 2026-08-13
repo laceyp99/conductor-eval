@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,7 @@ from conductor_core import (
     EngineConfig,
     GenerationRequest,
     LoopGenerationEngine,
+    ProgressEvent,
     ProviderRateLimitError,
 )
 from conductor_core.music import DURATION_KEYWORDS, get_model_info
@@ -77,19 +79,37 @@ class EvalEngineAdapter:
         temperature: float,
         use_thinking: bool,
         effort: str | None,
+        on_provider_call: Callable[[], None] | None = None,
     ) -> tuple[MidiFile, list[dict], float | None]:
-        core_result = self.engine.generate(
-            GenerationRequest(
-                key=key,
-                scale=scale,
-                description=description,
-                model=model,
-                temperature=temperature,
-                use_thinking=use_thinking,
-                effort=effort or "low",
-                render_audio=False,
-            )
+        provider_call_recorded = False
+
+        def record_provider_call(event: ProgressEvent) -> None:
+            nonlocal provider_call_recorded
+            if (
+                event.stage == "provider_call"
+                and not provider_call_recorded
+                and on_provider_call is not None
+            ):
+                on_provider_call()
+                provider_call_recorded = True
+
+        request = GenerationRequest(
+            key=key,
+            scale=scale,
+            description=description,
+            model=model,
+            temperature=temperature,
+            use_thinking=use_thinking,
+            effort=effort or "low",
+            render_audio=False,
         )
+        if on_provider_call is None:
+            core_result = self.engine.generate(request)
+        else:
+            core_result = self.engine.generate(
+                request,
+                progress_callback=record_provider_call,
+            )
         return MidiFile(core_result.midi_path), core_result.messages, core_result.cost
 
 
@@ -1041,7 +1061,11 @@ class Evaluator:
         execution = manifest_task["execution"]
         current_state = execution["state"]
         allowed_transitions = {
-            "queued": {"dispatched", "unstarted_due_to_throttling"},
+            "queued": {
+                "dispatched",
+                "pre_dispatch_failed",
+                "unstarted_due_to_throttling",
+            },
             "dispatched": {"completed", "failed", "throttled"},
         }
         if state not in allowed_transitions.get(current_state, set()):
@@ -1280,7 +1304,7 @@ class Evaluator:
 
         async def admit_task(
             key: tuple[str, str], task: dict, executor: ThreadPoolExecutor, live: Live
-        ) -> tuple[float, asyncio.Task] | None:
+        ) -> tuple[float | None, asyncio.Task] | None:
             await global_semaphore.acquire()
             if key in throttled_models:
                 global_semaphore.release()
@@ -1288,11 +1312,24 @@ class Evaluator:
             started = loop.create_future()
 
             def record_dispatch(monotonic_time: float, wall_time: str) -> None:
+                journal_acknowledged = threading.Event()
+                journal_errors: list[BaseException] = []
+
                 def resolve_start() -> None:
                     if not started.done():
-                        started.set_result((monotonic_time, wall_time))
+                        started.set_result(
+                            (
+                                monotonic_time,
+                                wall_time,
+                                journal_acknowledged,
+                                journal_errors,
+                            )
+                        )
 
                 loop.call_soon_threadsafe(resolve_start)
+                journal_acknowledged.wait()
+                if journal_errors:
+                    raise journal_errors[0]
 
             result_future = loop.run_in_executor(
                 executor,
@@ -1309,25 +1346,29 @@ class Evaluator:
                 {started, result_future}, return_when=asyncio.FIRST_COMPLETED
             )
             if started in done:
-                started_at, dispatched_at = started.result()
+                started_at, dispatched_at, journal_acknowledged, journal_errors = started.result()
+                try:
+                    self._transition_manifest_task(
+                        run_path,
+                        manifest,
+                        task["task_id"],
+                        "dispatched",
+                        dispatched_at=dispatched_at,
+                    )
+                except BaseException as error:
+                    journal_errors.append(error)
+                    raise
+                finally:
+                    journal_acknowledged.set()
             else:
-                # A pre-dispatch setup failure still produced a generation result.
                 started.cancel()
-                started_at = self._monotonic()
-                dispatched_at = datetime.now().astimezone().isoformat()
-
-            self._transition_manifest_task(
-                run_path,
-                manifest,
-                task["task_id"],
-                "dispatched",
-                dispatched_at=dispatched_at,
-            )
+                started_at = None
 
             async def finish_task() -> dict:
                 try:
                     result = await result_future
                     is_throttled = result.get("failure_kind") == "provider_rate_limit"
+                    is_pre_dispatch_failure = result.get("failure_kind") == "pre_dispatch_failed"
                     if is_throttled:
                         throttled_models.setdefault(key, task["task_id"])
                         throttle_events[key].set()
@@ -1335,11 +1376,15 @@ class Evaluator:
                         run_path,
                         manifest,
                         task["task_id"],
-                        "throttled"
-                        if is_throttled
-                        else "failed"
-                        if result.get("error")
-                        else "completed",
+                        (
+                            "pre_dispatch_failed"
+                            if is_pre_dispatch_failure
+                            else "throttled"
+                            if is_throttled
+                            else "failed"
+                            if result.get("error")
+                            else "completed"
+                        ),
                         terminal_at=datetime.now().astimezone().isoformat(),
                     )
                     results.append(result)
@@ -1408,7 +1453,9 @@ class Evaluator:
                         run_path, manifest, queue[index:], throttled_models[key]
                     )
                     break
-                last_start, completion = admission
+                started_at, completion = admission
+                if started_at is not None:
+                    last_start = started_at
                 in_flight.add(completion)
 
             if in_flight:
@@ -1463,19 +1510,34 @@ class Evaluator:
 
         with Live(table, console=self.console, refresh_per_second=2) as live:
             for i, task in enumerate(tasks):
-                self._transition_manifest_task(
+
+                def record_dispatch(monotonic_time: float, wall_time: str) -> None:
+                    self._transition_manifest_task(
+                        run_path,
+                        manifest,
+                        task["task_id"],
+                        "dispatched",
+                        dispatched_at=wall_time,
+                    )
+
+                result = self._run_single(
+                    task,
                     run_path,
-                    manifest,
-                    task["task_id"],
-                    "dispatched",
-                    dispatched_at=datetime.now().astimezone().isoformat(),
+                    tests_to_run,
+                    logger,
+                    on_dispatch=record_dispatch,
                 )
-                result = self._run_single(task, run_path, tests_to_run, logger)
                 self._transition_manifest_task(
                     run_path,
                     manifest,
                     task["task_id"],
-                    "failed" if result.get("error") else "completed",
+                    (
+                        "pre_dispatch_failed"
+                        if result.get("failure_kind") == "pre_dispatch_failed"
+                        else "failed"
+                        if result.get("error")
+                        else "completed"
+                    ),
                     terminal_at=datetime.now().astimezone().isoformat(),
                 )
                 results.append(result)
@@ -1584,15 +1646,19 @@ class Evaluator:
 
         # Generate MIDI
         start_time = time.perf_counter()
-        dispatch_recorded = False
-        try:
-            adapter = EvalEngineAdapter(run_path / "core_artifacts")
+        provider_call_recorded = False
+
+        def record_provider_call() -> None:
+            nonlocal provider_call_recorded
             if on_dispatch is not None:
                 on_dispatch(
                     self._monotonic(),
                     datetime.now().astimezone().isoformat(),
                 )
-                dispatch_recorded = True
+            provider_call_recorded = True
+
+        try:
+            adapter = EvalEngineAdapter(run_path / "core_artifacts")
             midi_file, messages, cost = adapter.generate(
                 description=original_prompt,
                 key=root,
@@ -1601,6 +1667,7 @@ class Evaluator:
                 temperature=self.temperature,
                 use_thinking=use_thinking,
                 effort=effort,
+                on_provider_call=record_provider_call,
             )
             time_elapsed = time.perf_counter() - start_time
 
@@ -1609,11 +1676,6 @@ class Evaluator:
             result["metrics"]["cost"] = cost
             result["metrics"]["cost_available"] = cost is not None
         except Exception as e:
-            if on_dispatch is not None and not dispatch_recorded:
-                on_dispatch(
-                    self._monotonic(),
-                    datetime.now().astimezone().isoformat(),
-                )
             result["metrics"]["attempt_latency"] = time.perf_counter() - start_time
             logger.error(
                 "Task failed: task_id=%s provider=%s model=%s root=%s scale=%s variation=%s "
@@ -1629,7 +1691,9 @@ class Evaluator:
             )
             result["error"] = str(e)
             result["error_type"] = type(e).__name__
-            if isinstance(e, ProviderRateLimitError):
+            if not provider_call_recorded:
+                result["failure_kind"] = "pre_dispatch_failed"
+            elif isinstance(e, ProviderRateLimitError):
                 result["failure_kind"] = "provider_rate_limit"
             result["tests"]["overall_pass"] = False
             result["tests"]["overall_status"] = "generation_error"
@@ -1705,10 +1769,14 @@ class Evaluator:
         """
         if manifest is None:
             planned_tasks = len(all_results)
-            dispatched_tasks = len(all_results)
+            pre_dispatch_failure_tasks = sum(
+                result.get("failure_kind") == "pre_dispatch_failed" for result in all_results
+            )
+            dispatched_tasks = len(all_results) - pre_dispatch_failure_tasks
             completed_tasks = sum(not result.get("error") for result in all_results)
             generation_failure_tasks = sum(
-                bool(result.get("error")) and result.get("failure_kind") != "provider_rate_limit"
+                bool(result.get("error"))
+                and result.get("failure_kind") not in {"provider_rate_limit", "pre_dispatch_failed"}
                 for result in all_results
             )
             throttled_generation_tasks = sum(
@@ -1726,6 +1794,7 @@ class Evaluator:
             generation_failure_tasks = execution_states.count("failed")
             throttled_generation_tasks = execution_states.count("throttled")
             unstarted_tasks = execution_states.count("unstarted_due_to_throttling")
+            pre_dispatch_failure_tasks = execution_states.count("pre_dispatch_failed")
 
         summary = {
             "run_id": config["run_id"],
@@ -1736,6 +1805,7 @@ class Evaluator:
                 "dispatched_tasks": dispatched_tasks,
                 "completed_tasks": completed_tasks,
                 "generation_failure_tasks": generation_failure_tasks,
+                "pre_dispatch_failure_tasks": pre_dispatch_failure_tasks,
                 "throttled_generation_tasks": throttled_generation_tasks,
                 "unstarted_due_to_throttling_tasks": unstarted_tasks,
                 "successful_generations": 0,

@@ -184,8 +184,9 @@ def test_evaluations_keep_logs_and_artifacts_isolated_when_overlapping(monkeypat
             }
         ]
 
-    def run_single(task, run_path, tests_to_run, logger):
+    def run_single(task, run_path, tests_to_run, logger, on_dispatch):
         task_barrier.wait(timeout=5)
+        on_dispatch(0.0, "2026-08-12T12:00:00-04:00")
         logger.info("Running task marker=%s", task["marker"])
         return {
             "provider": task["provider"],
@@ -283,8 +284,10 @@ class RecordingEngine:
         self.result = result
         self.requests = []
 
-    def generate(self, request):
+    def generate(self, request, progress_callback=None):
         self.requests.append(request)
+        if progress_callback is not None:
+            progress_callback(SimpleNamespace(stage="provider_call"))
         return self.result
 
 
@@ -325,6 +328,27 @@ def test_eval_engine_adapter_delegates_generation_to_core(tmp_path):
             render_audio=False,
         )
     ]
+
+
+def test_eval_engine_adapter_forwards_provider_call_boundary(tmp_path):
+    midi_path = tmp_path / "core-loop.mid"
+    MidiFile().save(midi_path)
+    engine = RecordingEngine(SimpleNamespace(midi_path=str(midi_path), messages=[], cost=None))
+    adapter = EvalEngineAdapter(tmp_path / "core-artifacts", engine=engine)
+    events = []
+
+    adapter.generate(
+        description="warm loop",
+        key="C",
+        scale="major",
+        model="gpt-test",
+        temperature=0.0,
+        use_thinking=False,
+        effort=None,
+        on_provider_call=lambda: events.append("provider-call"),
+    )
+
+    assert events == ["provider-call"]
 
 
 def test_save_results_uses_unique_safe_task_directory(tmp_path):
@@ -733,7 +757,8 @@ def test_run_single_records_dispatch_immediately_before_core_generation(monkeypa
         def __init__(self, output_dir):
             events.append("adapter-created")
 
-        def generate(self, **kwargs):
+        def generate(self, on_provider_call, **kwargs):
+            on_provider_call()
             events.append("core-generation")
             return MidiFile(), [], None
 
@@ -756,6 +781,97 @@ def test_run_single_records_dispatch_immediately_before_core_generation(monkeypa
     )
 
     assert events == ["adapter-created", "dispatch", "core-generation"]
+
+
+def test_scheduler_durably_journals_dispatch_before_worker_continues(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    task = scheduler_task("OpenAI", "model-a", 1)
+    journal_states = []
+
+    def run_single(task, run_path, tests_to_run, logger, on_dispatch):
+        on_dispatch(0.0, "2026-08-12T12:00:00-04:00")
+        events = [
+            json.loads(line)
+            for line in (run_path / "task_events.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        journal_states.append(events[-1]["state"])
+        return {
+            "provider": task["provider"],
+            "model": task["model"],
+            "metrics": {},
+            "tests": {"overall_pass": True},
+            "error": None,
+        }
+
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
+
+    run_scheduler(
+        evaluator,
+        tmp_path,
+        [task],
+        {("OpenAI", "model-a"): 5},
+    )
+
+    assert journal_states == ["dispatched"]
+
+
+def test_pre_dispatch_failures_do_not_advance_rate_schedule_or_stop_queue(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    clock = FakeSchedulerClock()
+    evaluator._monotonic = clock.monotonic
+    evaluator._sleep = clock.sleep
+    tasks = [scheduler_task("OpenAI", "model-a", index) for index in range(3)]
+    starts = []
+
+    def run_single(task, run_path, tests_to_run, logger, on_dispatch):
+        if task is tasks[0]:
+            return {
+                "provider": task["provider"],
+                "model": task["model"],
+                "root": task["root"],
+                "scale": task["scale"],
+                "metrics": {},
+                "tests": {"overall_pass": False, "overall_status": "generation_error"},
+                "error": "invalid task input",
+                "failure_kind": "pre_dispatch_failed",
+            }
+
+        started_at = clock.monotonic()
+        starts.append(started_at)
+        on_dispatch(started_at, f"wall-{started_at}")
+        return {
+            "provider": task["provider"],
+            "model": task["model"],
+            "root": task["root"],
+            "scale": task["scale"],
+            "metrics": {},
+            "tests": {"overall_pass": True},
+            "error": None,
+        }
+
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
+
+    results, manifest = run_scheduler(
+        evaluator,
+        tmp_path,
+        tasks,
+        {("OpenAI", "model-a"): 5},
+        per_model_concurrency=1,
+    )
+
+    assert len(results) == 3
+    assert starts == [0.0, 12.0]
+    assert [entry["execution"]["state"] for entry in manifest["tasks"]] == [
+        "pre_dispatch_failed",
+        "completed",
+        "completed",
+    ]
+    summary = evaluator._generate_summary(results, {"run_id": "pre-dispatch-test"}, manifest)
+    assert summary["totals"]["planned_tasks"] == 3
+    assert summary["totals"]["dispatched_tasks"] == 2
+    assert summary["totals"]["completed_tasks"] == 2
+    assert summary["totals"]["generation_failure_tasks"] == 0
+    assert summary["totals"]["pre_dispatch_failure_tasks"] == 1
 
 
 def test_scheduler_enforces_per_model_concurrency(monkeypatch, tmp_path):
@@ -858,6 +974,7 @@ def test_run_single_preserves_typed_provider_rate_limit(monkeypatch, tmp_path):
             pass
 
         def generate(self, **kwargs):
+            kwargs["on_provider_call"]()
             raise ProviderRateLimitError("OpenAI", "account rate exceeded")
 
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
@@ -889,6 +1006,7 @@ def test_run_single_does_not_misclassify_other_generation_errors(monkeypatch, tm
             pass
 
         def generate(self, **kwargs):
+            kwargs["on_provider_call"]()
             raise error
 
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
@@ -901,6 +1019,26 @@ def test_run_single_does_not_misclassify_other_generation_errors(monkeypatch, tm
 
     assert result["error_type"] == type(error).__name__
     assert result["failure_kind"] is None
+
+
+def test_run_single_classifies_failure_before_provider_boundary(monkeypatch, tmp_path):
+    class PreDispatchFailingAdapter:
+        def __init__(self, output_dir):
+            pass
+
+        def generate(self, **kwargs):
+            raise ValueError("invalid task input")
+
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    monkeypatch.setattr(evaluator_module, "EvalEngineAdapter", PreDispatchFailingAdapter)
+    task = scheduler_task("OpenAI", "model-a", 1)
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+
+    result = evaluator._run_single(task, run_path, ["scale"])
+
+    assert result["error_type"] == "ValueError"
+    assert result["failure_kind"] == "pre_dispatch_failed"
 
 
 def test_typed_throttle_stops_only_affected_model_and_finishes_inflight(monkeypatch, tmp_path):
@@ -1673,6 +1811,7 @@ def test_failed_generation_records_attempt_latency_and_contextual_log(monkeypatc
             self.output_dir = output_dir
 
         def generate(self, **kwargs):
+            kwargs["on_provider_call"]()
             raise RuntimeError("provider timed out")
 
     monkeypatch.setattr("conductor_eval.evaluator.EvalEngineAdapter", FailingAdapter)
@@ -1721,6 +1860,7 @@ def test_run_log_excludes_task_success_telemetry(monkeypatch, tmp_path):
             self.output_dir = output_dir
 
         def generate(self, **kwargs):
+            kwargs["on_provider_call"]()
             return MidiFile(), [{"role": "assistant", "content": "loop"}], 0.125
 
     monkeypatch.setattr("conductor_eval.evaluator.EvalEngineAdapter", SuccessfulAdapter)

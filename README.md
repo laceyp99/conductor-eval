@@ -214,6 +214,12 @@ work never causes a catch-up burst. Prompts, roots, scales, and reasoning
 variations for one base model share the same FIFO schedule, while other model
 queues can advance independently.
 
+Core's `provider_call` progress event is the dispatch boundary. Before Core may
+continue to the provider request, Eval appends and syncs the task's `dispatched`
+transition and acknowledges that durable write. A setup or validation failure
+before this boundary is recorded as `pre_dispatch_failed`; it does not advance
+the model's RPM clock or stop the rest of that model queue.
+
 Core metadata supplies the default RPM. Account-specific limits can be recorded
 for one run with nested provider/model overrides:
 
@@ -396,13 +402,14 @@ with the fully materialized final state. The journal is retained for recovery
 and auditing, and records already included in the final snapshot are skipped
 during replay.
 
-Execution states are `queued`, `dispatched`, `completed`, `failed`, `throttled`,
-and `unstarted_due_to_throttling`. Unstarted entries link to the triggering
-throttled task and never receive synthetic result directories. The manifest
-contains prompts because they are required task inputs, but excludes provider
-responses, generated messages, credentials, and environment values. It records
-enough immutable state for a future explicit resume feature; this release does
-not execute resumed runs.
+Execution states are `queued`, `pre_dispatch_failed`, `dispatched`, `completed`,
+`failed`, `throttled`, and `unstarted_due_to_throttling`. Pre-dispatch failures
+remain task-specific terminal results and do not stop their model queue.
+Unstarted entries link to the triggering throttled task and never receive
+synthetic result directories. The manifest contains prompts because they are
+required task inputs, but excludes provider responses, generated messages,
+credentials, and environment values. It records enough immutable state for a
+future explicit resume feature; this release does not execute resumed runs.
 
 #### summary.json
 
@@ -417,6 +424,7 @@ Aggregated statistics for the entire run:
         "dispatched_tasks": 48,
         "completed_tasks": 45,
         "generation_failure_tasks": 2,
+        "pre_dispatch_failure_tasks": 0,
         "throttled_generation_tasks": 1,
         "unstarted_due_to_throttling_tasks": 3,
         "successful_generations": 45,
@@ -584,6 +592,8 @@ The evaluator continues on failures, logging errors and saving partial results:
 - Core generation or MIDI conversion errors are logged but don't halt the evaluation
 - The first typed provider rate-limit failure stops only that provider/model's
   queued work; already dispatched work finishes and other model queues continue
+- Task setup failures before Core reaches its provider-call boundary are saved
+  as `pre_dispatch_failed`; they consume no RPM slot and do not stop the queue
 - Eval does not automatically retry provider failures or spend additional calls
 - Eval-owned logs are written to `<output_dir>/<run-id>/run.log`
 - Host application, root logger, and unrelated library output are not redirected
