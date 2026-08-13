@@ -1,15 +1,18 @@
 import json
 import logging
 import threading
+import time
 from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 from conductor_core import GenerationRequest
+from conductor_core.errors import ProviderRateLimitError
 from mido import Message, MidiFile
 
 import conductor_eval.evaluator as evaluator_module
 from conductor_eval import EvalEngineAdapter, Evaluator
+from conductor_eval.outcomes import get_overall_status
 
 
 def test_texture_checks_are_available():
@@ -614,6 +617,7 @@ def test_run_tests_classifies_checker_exceptions_as_ineligible_check_errors(monk
         ({"overall_pass": False, "overall_status": "failed"}, True),
         ({"overall_pass": False, "overall_status": "ineligible"}, False),
         ({"overall_pass": False, "overall_status": "generation_error"}, False),
+        ({"overall_pass": False, "overall_status": "rate_limited"}, False),
         ({"overall_pass": False, "overall_status": "check_error"}, False),
         ({"overall_pass": False}, True),
     ],
@@ -622,9 +626,99 @@ def test_overall_eligibility_contract_includes_only_valid_verdicts(test_results,
     assert Evaluator._is_overall_eligible(test_results) is expected
 
 
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"tests": {"overall_status": "rate_limited"}, "error": "throttled"}, "rate_limited"),
+        ({"tests": {}, "error": "provider failed"}, "generation_error"),
+        ({"tests": {"overall_pass": True}, "error": None}, "passed"),
+        ({"tests": {"overall_pass": False}, "error": None}, "failed"),
+        ({}, "failed"),
+    ],
+)
+def test_get_overall_status_preserves_status_and_supports_legacy_results(result, expected):
+    assert get_overall_status(result) == expected
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 1.5, "4"])
+def test_evaluate_rejects_invalid_cloud_concurrency_before_output(tmp_path, value):
+    output_dir = tmp_path / "evaluations"
+    evaluator = Evaluator(output_dir=output_dir)
+
+    with pytest.raises(ValueError, match="max_cloud_concurrency must be a positive integer"):
+        evaluator.evaluate(
+            prompts="melody",
+            roots=["C"],
+            models=[],
+            run_name="invalid-concurrency",
+            max_cloud_concurrency=value,
+        )
+
+    assert not output_dir.exists()
+
+
+def test_async_batch_caps_each_provider_independently(monkeypatch, tmp_path):
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    active = {"OpenAI": 0, "Anthropic": 0}
+    peaks = {"OpenAI": 0, "Anthropic": 0}
+    total_active = 0
+    total_peak = 0
+    lock = threading.Lock()
+
+    def run_single(task, **kwargs):
+        nonlocal total_active, total_peak
+        provider = task["provider"]
+        with lock:
+            active[provider] += 1
+            total_active += 1
+            peaks[provider] = max(peaks[provider], active[provider])
+            total_peak = max(total_peak, total_active)
+        time.sleep(0.05)
+        with lock:
+            active[provider] -= 1
+            total_active -= 1
+        return {
+            "provider": provider,
+            "model": task["model"],
+            "root": "C",
+            "scale": "major",
+            "metrics": {},
+            "tests": {"overall_pass": True, "overall_status": "passed"},
+            "error": None,
+        }
+
+    monkeypatch.setattr(evaluator, "_run_single", run_single)
+    tasks = [
+        {"provider": provider, "model": f"model-{index}"}
+        for provider in active
+        for index in range(4)
+    ]
+
+    results = evaluator_module.asyncio.run(
+        evaluator._run_async_batch(
+            tasks,
+            tmp_path,
+            ["scale"],
+            logging.Logger("test"),
+            max_cloud_concurrency=2,
+        )
+    )
+
+    assert len(results) == 8
+    assert peaks == {"OpenAI": 2, "Anthropic": 2}
+    assert total_peak == 4
+
+
 def test_summary_separates_all_outcomes_and_excludes_noneligible_results(tmp_path):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
-    statuses = ["passed", "failed", "ineligible", "generation_error", "check_error"]
+    statuses = [
+        "passed",
+        "failed",
+        "ineligible",
+        "generation_error",
+        "rate_limited",
+        "check_error",
+    ]
     results = [
         {
             "model": "model",
@@ -636,7 +730,13 @@ def test_summary_separates_all_outcomes_and_excludes_noneligible_results(tmp_pat
                 "overall_pass": status == "passed",
                 "overall_status": status,
             },
-            "error": "generation failed" if status == "generation_error" else None,
+            "error": (
+                "provider throttled"
+                if status == "rate_limited"
+                else "generation failed"
+                if status == "generation_error"
+                else None
+            ),
         }
         for status in statuses
     ]
@@ -648,11 +748,44 @@ def test_summary_separates_all_outcomes_and_excludes_noneligible_results(tmp_pat
     assert summary["totals"]["validation_failed_generations"] == 1
     assert summary["totals"]["ineligible_generations"] == 1
     assert summary["totals"]["generation_error_generations"] == 1
+    assert summary["totals"]["rate_limited_generations"] == 1
     assert summary["totals"]["check_error_generations"] == 1
     assert summary["totals"]["overall_pass_rate"] == 0.5
     assert summary["by_model"]["model"]["check_errors"] == 1
+    assert summary["by_model"]["model"]["rate_limited"] == 1
     assert summary["by_root"]["C"]["check_errors"] == 1
     assert summary["by_scale"]["major"]["check_errors"] == 1
+
+
+def test_rate_limit_error_is_persisted_as_distinct_outcome(monkeypatch, tmp_path):
+    class RateLimitedAdapter:
+        def __init__(self, output_dir):
+            self.output_dir = output_dir
+
+        def generate(self, **kwargs):
+            raise ProviderRateLimitError("OpenAI", "account rate exceeded")
+
+    monkeypatch.setattr(evaluator_module, "EvalEngineAdapter", RateLimitedAdapter)
+    evaluator = Evaluator(output_dir=tmp_path / "evaluations")
+    task = {
+        "provider": "OpenAI",
+        "model": "test-model",
+        "full_prompt": "prompt in C major",
+        "original_prompt": "prompt",
+        "root": "C",
+        "scale": "major",
+        "use_thinking": False,
+        "effort": None,
+        "variation_name": "standard",
+        "task_id": "task-rate-limit-0123456789abcdef-1",
+    }
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+
+    result = evaluator._run_single(task, run_path, ["scale"])
+
+    assert result["tests"]["overall_status"] == "rate_limited"
+    assert result["tests"]["overall_pass"] is False
 
 
 def test_generate_tasks_copies_test_params_to_each_task(tmp_path):
