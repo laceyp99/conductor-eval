@@ -40,7 +40,9 @@ def test_ollama_discovery_returns_empty_when_unavailable(monkeypatch):
     def fail_discovery():
         raise RuntimeError("Ollama is unavailable")
 
-    monkeypatch.setattr("conductor_eval.evaluator.ollama_api.get_model_list", fail_discovery)
+    monkeypatch.setattr(
+        "conductor_eval.evaluator.ollama_api.get_model_list", fail_discovery
+    )
 
     assert Evaluator._discover_ollama_models() == []
 
@@ -83,7 +85,9 @@ def test_successful_evaluation_log_is_minimal(tmp_path):
     assert "Saved result artifacts" not in log_contents
 
 
-def test_evaluations_keep_logs_and_artifacts_isolated_when_overlapping(monkeypatch, tmp_path):
+def test_evaluations_keep_logs_and_artifacts_isolated_when_overlapping(
+    monkeypatch, tmp_path
+):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
     resolution_barrier = threading.Barrier(2)
     task_barrier = threading.Barrier(2)
@@ -159,7 +163,9 @@ def test_evaluations_keep_logs_and_artifacts_isolated_when_overlapping(monkeypat
     run_paths = list((tmp_path / "evaluations").iterdir())
     assert len(run_paths) == 2
     assert len({path.name for path in run_paths}) == 2
-    assert all(path.name.startswith("20260726_123456_789012_same-name-") for path in run_paths)
+    assert all(
+        path.name.startswith("20260726_123456_789012_same-name-") for path in run_paths
+    )
 
     for run_path in run_paths:
         log_contents = (run_path / "run.log").read_text(encoding="utf-8")
@@ -168,7 +174,9 @@ def test_evaluations_keep_logs_and_artifacts_isolated_when_overlapping(monkeypat
         other_paths = [path for path in run_paths if path != run_path]
         marker = config["models"][0][1]
         other_marker = next(
-            json.loads((path / "config.json").read_text(encoding="utf-8"))["models"][0][1]
+            json.loads((path / "config.json").read_text(encoding="utf-8"))["models"][0][
+                1
+            ]
             for path in other_paths
         )
         assert config["run_id"] == run_path.name
@@ -294,13 +302,20 @@ def test_save_results_uses_unique_safe_task_directory(tmp_path):
     assert (result_dir / "loop.mid").exists()
     legacy_filename = "output" + ".mid"
     assert not (result_dir / legacy_filename).exists()
-    assert json.loads((result_dir / "messages.json").read_text(encoding="utf-8")) == messages
+    assert (
+        json.loads((result_dir / "messages.json").read_text(encoding="utf-8"))
+        == messages
+    )
 
 
-def test_create_run_directory_returns_compact_authoritative_metadata(tmp_path, monkeypatch):
+def test_create_run_directory_returns_compact_authoritative_metadata(
+    tmp_path, monkeypatch
+):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
     frozen_time = datetime(2026, 7, 28, 12, 34, 56, 789012, tzinfo=timezone.utc)
-    monkeypatch.setattr(evaluator_module, "datetime", SimpleNamespace(now=lambda _tz: frozen_time))
+    monkeypatch.setattr(
+        evaluator_module, "datetime", SimpleNamespace(now=lambda _tz: frozen_time)
+    )
     monkeypatch.setattr(
         evaluator_module,
         "uuid4",
@@ -321,7 +336,9 @@ def test_create_run_directory_fails_for_exact_collision(tmp_path, monkeypatch):
         evaluator_module,
         "datetime",
         SimpleNamespace(
-            now=lambda _tz: datetime(2026, 7, 28, 12, 34, 56, 789012, tzinfo=timezone.utc)
+            now=lambda _tz: datetime(
+                2026, 7, 28, 12, 34, 56, 789012, tzinfo=timezone.utc
+            )
         ),
     )
     monkeypatch.setattr(
@@ -528,7 +545,9 @@ def test_run_tests_marks_dangling_note_ineligible_under_default_checks(tmp_path)
 
 
 @pytest.mark.parametrize("texture_test", ["monophony", "polyphony"])
-def test_run_tests_requires_completed_notes_for_texture_evidence(tmp_path, texture_test):
+def test_run_tests_requires_completed_notes_for_texture_evidence(
+    tmp_path, texture_test
+):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
 
     results = evaluator.run_tests(
@@ -585,7 +604,9 @@ def test_run_tests_always_includes_scale_when_callers_omit_it(tmp_path):
     assert results["overall_status"] == "passed"
 
 
-def test_run_tests_classifies_checker_exceptions_as_ineligible_check_errors(monkeypatch, tmp_path):
+def test_run_tests_classifies_checker_exceptions_as_ineligible_check_errors(
+    monkeypatch, tmp_path
+):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
 
     def fail_scale_check(*args):
@@ -624,21 +645,28 @@ def test_run_tests_classifies_checker_exceptions_as_ineligible_check_errors(monk
         ({"overall_pass": False}, True),
     ],
 )
-def test_overall_eligibility_contract_includes_only_valid_verdicts(test_results, expected):
+def test_overall_eligibility_contract_includes_only_valid_verdicts(
+    test_results, expected
+):
     assert Evaluator._is_overall_eligible(test_results) is expected
 
 
 @pytest.mark.parametrize(
     ("result", "expected"),
     [
-        ({"tests": {"overall_status": "rate_limited"}, "error": "throttled"}, "rate_limited"),
+        (
+            {"tests": {"overall_status": "rate_limited"}, "error": "throttled"},
+            "rate_limited",
+        ),
         ({"tests": {}, "error": "provider failed"}, "generation_error"),
         ({"tests": {"overall_pass": True}, "error": None}, "passed"),
         ({"tests": {"overall_pass": False}, "error": None}, "failed"),
         ({}, "failed"),
     ],
 )
-def test_get_overall_status_preserves_status_and_supports_legacy_results(result, expected):
+def test_get_overall_status_preserves_status_and_supports_legacy_results(
+    result, expected
+):
     assert get_overall_status(result) == expected
 
 
@@ -647,7 +675,9 @@ def test_evaluate_rejects_invalid_cloud_concurrency_before_output(tmp_path, valu
     output_dir = tmp_path / "evaluations"
     evaluator = Evaluator(output_dir=output_dir)
 
-    with pytest.raises(ValueError, match="max_cloud_concurrency must be a positive integer"):
+    with pytest.raises(
+        ValueError, match="max_cloud_concurrency must be a positive integer"
+    ):
         evaluator.evaluate(
             prompts="melody",
             roots=["C"],
@@ -821,7 +851,9 @@ def test_test_params_reject_unselected_test(tmp_path):
         )
 
 
-def test_run_tests_rejects_unknown_checks_before_running_any_check(monkeypatch, tmp_path):
+def test_run_tests_rejects_unknown_checks_before_running_any_check(
+    monkeypatch, tmp_path
+):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
 
     def unexpected_scale_check(*args):
@@ -920,7 +952,9 @@ def test_summary_reports_latency_and_default_rates_for_ineligible_result(tmp_pat
     assert summary["by_scale"]["major"]["pass_rate"] == 0.0
 
 
-def test_failed_generation_records_attempt_latency_and_contextual_log(monkeypatch, tmp_path):
+def test_failed_generation_records_attempt_latency_and_contextual_log(
+    monkeypatch, tmp_path
+):
     class FailingAdapter:
         def __init__(self, output_dir):
             self.output_dir = output_dir
@@ -929,7 +963,9 @@ def test_failed_generation_records_attempt_latency_and_contextual_log(monkeypatc
             raise RuntimeError("provider timed out")
 
     monkeypatch.setattr("conductor_eval.evaluator.EvalEngineAdapter", FailingAdapter)
-    monkeypatch.setattr("conductor_eval.evaluator.time.perf_counter", lambda: next(clock))
+    monkeypatch.setattr(
+        "conductor_eval.evaluator.time.perf_counter", lambda: next(clock)
+    )
     clock = iter([100.0, 103.5])
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
     task = {
@@ -962,7 +998,10 @@ def test_failed_generation_records_attempt_latency_and_contextual_log(monkeypatc
     }
     log_contents = (run_path / "run.log").read_text(encoding="utf-8")
     assert "Task failed: task_id=task-prompt-0123456789abcdef-1" in log_contents
-    assert "provider=OpenAI model=test-model root=C scale=major variation=standard" in log_contents
+    assert (
+        "provider=OpenAI model=test-model root=C scale=major variation=standard"
+        in log_contents
+    )
     assert "error_type=RuntimeError" in log_contents
     assert "Traceback:" in log_contents
     assert "sensitive prompt" not in log_contents
@@ -977,7 +1016,9 @@ def test_run_log_excludes_task_success_telemetry(monkeypatch, tmp_path):
             return MidiFile(), [{"role": "assistant", "content": "loop"}], 0.125
 
     monkeypatch.setattr("conductor_eval.evaluator.EvalEngineAdapter", SuccessfulAdapter)
-    monkeypatch.setattr("conductor_eval.evaluator.time.perf_counter", lambda: next(clock))
+    monkeypatch.setattr(
+        "conductor_eval.evaluator.time.perf_counter", lambda: next(clock)
+    )
     clock = iter([100.0, 101.25])
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
     monkeypatch.setattr(

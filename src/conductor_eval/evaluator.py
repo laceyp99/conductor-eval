@@ -190,13 +190,17 @@ class Evaluator:
                 the ``evaluations`` subdirectory in Eval's data directory.
             temperature: Default temperature for generation.
         """
-        self.output_dir = get_evaluations_dir() if output_dir is None else Path(output_dir)
+        self.output_dir = (
+            get_evaluations_dir() if output_dir is None else Path(output_dir)
+        )
         self.temperature = temperature
         self.console = Console(force_terminal=True)
         self.model_info = get_model_info()
 
     @staticmethod
-    def _create_run_logger(run_path: Path, run_id: str) -> tuple[logging.Logger, logging.Handler]:
+    def _create_run_logger(
+        run_path: Path, run_id: str
+    ) -> tuple[logging.Logger, logging.Handler]:
         """Create an isolated file logger for one evaluation run."""
         logger = logging.Logger(f"{__name__}.run.{run_id}")
         logger.setLevel(logging.INFO)
@@ -308,11 +312,15 @@ class Evaluator:
                 test_reasoning=test_reasoning,
                 test_params=test_params,
             )
-            logger.info("Starting evaluation '%s' with %d total tasks", run_name, len(tasks))
+            logger.info(
+                "Starting evaluation '%s' with %d total tasks", run_name, len(tasks)
+            )
 
             # Separate async and sync tasks
             async_tasks = [t for t in tasks if self._is_async_provider(t["provider"])]
-            sync_tasks = [t for t in tasks if not self._is_async_provider(t["provider"])]
+            sync_tasks = [
+                t for t in tasks if not self._is_async_provider(t["provider"])
+            ]
 
             all_results = []
 
@@ -399,7 +407,9 @@ class Evaluator:
                 try:
                     test_result = test_func(midi_data, root, scale)
                     test_result["ran"] = True
-                    test_result["eligible"] = self._has_substantive_evidence(test_name, test_result)
+                    test_result["eligible"] = self._has_substantive_evidence(
+                        test_name, test_result
+                    )
                     test_result["passed"] = (
                         test_result["eligible"] and test_result.get("incorrect", 0) == 0
                     )
@@ -446,7 +456,8 @@ class Evaluator:
                             test_name, test_result
                         )
                         test_result["passed"] = (
-                            test_result["eligible"] and test_result.get("incorrect", 0) == 0
+                            test_result["eligible"]
+                            and test_result.get("incorrect", 0) == 0
                         )
                         test_result["status"] = (
                             "passed"
@@ -456,7 +467,9 @@ class Evaluator:
                             else "ineligible"
                         )
                         test_result["params"] = {"duration": duration_value}
-                        test_result["detected_from_prompt"] = "duration" not in explicit_params
+                        test_result["detected_from_prompt"] = (
+                            "duration" not in explicit_params
+                        )
                         results[test_name] = test_result
                         if test_result["eligible"]:
                             substantive_checks += 1
@@ -480,7 +493,9 @@ class Evaluator:
                 try:
                     test_result = test_func(midi_data, **resolved_params)
                     test_result["ran"] = True
-                    test_result["eligible"] = self._has_substantive_evidence(test_name, test_result)
+                    test_result["eligible"] = self._has_substantive_evidence(
+                        test_name, test_result
+                    )
                     test_result["passed"] = test_result["eligible"] and test_result.get(
                         "passed", test_result.get("incorrect", 0) == 0
                     )
@@ -520,7 +535,9 @@ class Evaluator:
         return results
 
     @staticmethod
-    def _validate_test_params(tests: list[str], test_params: dict[str, dict] | None) -> dict:
+    def _validate_test_params(
+        tests: list[str], test_params: dict[str, dict] | None
+    ) -> dict:
         """Validate and copy explicit test arguments."""
         if test_params is None:
             return {}
@@ -529,7 +546,9 @@ class Evaluator:
 
         unselected = sorted(set(test_params) - set(tests))
         if unselected:
-            raise ValueError("test_params contains unselected tests: " + ", ".join(unselected))
+            raise ValueError(
+                "test_params contains unselected tests: " + ", ".join(unselected)
+            )
 
         validated = {}
         for test_name, params in test_params.items():
@@ -559,24 +578,34 @@ class Evaluator:
                 for provider in ["OpenAI", "Anthropic", "Google"]:
                     if provider in self.model_info["models"]:
                         resolved.extend(
-                            (provider, model) for model in self.model_info["models"][provider]
+                            (provider, model)
+                            for model in self.model_info["models"][provider]
                         )
                 # All Ollama models
-                resolved.extend(("Ollama", model) for model in self._discover_ollama_models())
+                resolved.extend(
+                    ("Ollama", model) for model in self._discover_ollama_models()
+                )
 
             elif models_lower == "openai":
-                resolved.extend(("OpenAI", model) for model in self.model_info["models"]["OpenAI"])
+                resolved.extend(
+                    ("OpenAI", model) for model in self.model_info["models"]["OpenAI"]
+                )
 
             elif models_lower == "anthropic":
                 resolved.extend(
-                    ("Anthropic", model) for model in self.model_info["models"]["Anthropic"]
+                    ("Anthropic", model)
+                    for model in self.model_info["models"]["Anthropic"]
                 )
 
             elif models_lower == "google":
-                resolved.extend(("Google", model) for model in self.model_info["models"]["Google"])
+                resolved.extend(
+                    ("Google", model) for model in self.model_info["models"]["Google"]
+                )
 
             elif models_lower == "ollama":
-                resolved.extend(("Ollama", model) for model in self._discover_ollama_models())
+                resolved.extend(
+                    ("Ollama", model) for model in self._discover_ollama_models()
+                )
 
             else:
                 # Assume it's a single model name
@@ -651,7 +680,10 @@ class Evaluator:
         if provider == "Ollama":
             return {"extended_thinking": False, "effort_options": []}
 
-        if provider in self.model_info["models"] and model in self.model_info["models"][provider]:
+        if (
+            provider in self.model_info["models"]
+            and model in self.model_info["models"][provider]
+        ):
             return self.model_info["models"][provider][model]
 
         return {"extended_thinking": False, "effort_options": []}
@@ -744,7 +776,9 @@ class Evaluator:
 
         return tasks
 
-    def _generate_variations(self, model: str, provider: str, test_reasoning: bool) -> list[dict]:
+    def _generate_variations(
+        self, model: str, provider: str, test_reasoning: bool
+    ) -> list[dict]:
         """
         Generate all config variations to test for a model.
 
@@ -841,7 +875,9 @@ class Evaluator:
             list: List of result dictionaries
         """
         providers = {task["provider"] for task in tasks}
-        semaphores = {provider: asyncio.Semaphore(max_cloud_concurrency) for provider in providers}
+        semaphores = {
+            provider: asyncio.Semaphore(max_cloud_concurrency) for provider in providers
+        }
 
         results = []
         total_tasks = len(tasks)
@@ -877,7 +913,9 @@ class Evaluator:
                 results.append(result)
 
                 # Update table
-                new_table = Table(title=f"Evaluation Progress ({len(results)}/{total_tasks})")
+                new_table = Table(
+                    title=f"Evaluation Progress ({len(results)}/{total_tasks})"
+                )
                 new_table.add_column("Provider")
                 new_table.add_column("Model")
                 new_table.add_column("Eligible")
@@ -915,11 +953,17 @@ class Evaluator:
                         s["cost_count"] += 1
 
                 for (provider, model), s in stats.items():
-                    pass_rate = s["passed"] / s["eligible"] * 100 if s["eligible"] else 0
-                    avg_latency = (
-                        s["latency_sum"] / s["latency_count"] if s["latency_count"] else None
+                    pass_rate = (
+                        s["passed"] / s["eligible"] * 100 if s["eligible"] else 0
                     )
-                    avg_cost = s["cost_sum"] / s["cost_count"] if s["cost_count"] else None
+                    avg_latency = (
+                        s["latency_sum"] / s["latency_count"]
+                        if s["latency_count"]
+                        else None
+                    )
+                    avg_cost = (
+                        s["cost_sum"] / s["cost_count"] if s["cost_count"] else None
+                    )
                     new_table.add_row(
                         provider,
                         model,
@@ -969,7 +1013,9 @@ class Evaluator:
                 results.append(result)
 
                 # Update table
-                new_table = Table(title=f"Evaluation Progress ({len(results)}/{total_tasks})")
+                new_table = Table(
+                    title=f"Evaluation Progress ({len(results)}/{total_tasks})"
+                )
                 new_table.add_column("Model")
                 new_table.add_column("Eligible")
                 new_table.add_column("Pass Rate")
@@ -999,9 +1045,13 @@ class Evaluator:
                         s["latency_count"] += 1
 
                 for model, s in stats.items():
-                    pass_rate = s["passed"] / s["eligible"] * 100 if s["eligible"] else 0
+                    pass_rate = (
+                        s["passed"] / s["eligible"] * 100 if s["eligible"] else 0
+                    )
                     avg_latency = (
-                        s["latency_sum"] / s["latency_count"] if s["latency_count"] else None
+                        s["latency_sum"] / s["latency_count"]
+                        if s["latency_count"]
+                        else None
                     )
                     new_table.add_row(
                         model,
@@ -1103,7 +1153,9 @@ class Evaluator:
             result["error"] = str(e)
             result["tests"]["overall_pass"] = False
             result["tests"]["overall_status"] = (
-                "rate_limited" if isinstance(e, ProviderRateLimitError) else "generation_error"
+                "rate_limited"
+                if isinstance(e, ProviderRateLimitError)
+                else "generation_error"
             )
             # Still save the result even on failure
             self._save_results(result, None, [], run_path, task)
@@ -1427,7 +1479,9 @@ class Evaluator:
                 "test_params",
             )
         }
-        canonical = json.dumps(task_inputs, sort_keys=True, separators=(",", ":"), default=str)
+        canonical = json.dumps(
+            task_inputs, sort_keys=True, separators=(",", ":"), default=str
+        )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

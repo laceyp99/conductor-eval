@@ -70,8 +70,12 @@ def extract_note_intervals(midi: MidiFile) -> list[NoteInterval]:
             absolute_tick += msg.time
             if msg.type == "note_on" and msg.velocity > 0:
                 key = (msg.channel, msg.note)
-                active_notes.setdefault(key, deque()).append((absolute_tick, msg.velocity))
-            elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
+                active_notes.setdefault(key, deque()).append(
+                    (absolute_tick, msg.velocity)
+                )
+            elif msg.type == "note_off" or (
+                msg.type == "note_on" and msg.velocity == 0
+            ):
                 key = (msg.channel, msg.note)
                 starts = active_notes.get(key)
                 if not starts:
@@ -119,7 +123,9 @@ def calculate_polyphony_profile(midi: MidiFile) -> dict:
     for tick in sorted(events):
         elapsed = tick - previous_tick
         if elapsed:
-            distribution_ticks[active_notes] = distribution_ticks.get(active_notes, 0) + elapsed
+            distribution_ticks[active_notes] = (
+                distribution_ticks.get(active_notes, 0) + elapsed
+            )
         active_notes += events[tick]
         max_polyphony = max(max_polyphony, active_notes)
         previous_tick = tick
@@ -139,6 +145,8 @@ def calculate_polyphony_profile(midi: MidiFile) -> dict:
         "polyphony_distribution": distribution,
         "polyphony_percentages": percentages,
         "max_polyphony": max_polyphony,
-        "total_duration": round(ticks_to_beats(total_duration_ticks, midi.ticks_per_beat), 4),
+        "total_duration": round(
+            ticks_to_beats(total_duration_ticks, midi.ticks_per_beat), 4
+        ),
         "ticks_per_beat": midi.ticks_per_beat,
     }

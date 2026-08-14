@@ -51,7 +51,11 @@ def make_timed_midi(notes):
 
 
 def block_chord_notes(chords):
-    return [(pitch, bar * 4, (bar + 1) * 4) for bar, chord in enumerate(chords) for pitch in chord]
+    return [
+        (pitch, bar * 4, (bar + 1) * 4)
+        for bar, chord in enumerate(chords)
+        for pitch in chord
+    ]
 
 
 def run_harmonic_checks(midi, root, scale):
