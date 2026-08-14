@@ -116,6 +116,36 @@ def _overall_statuses(df):
     return df["overall_pass"].map(lambda passed: "passed" if passed else "failed")
 
 
+def _format_pass_rate_summary(passed, eligible_count, exception_counts):
+    """Return compact pass-rate text and color for overview summaries."""
+    if eligible_count:
+        pass_rate = round(passed / eligible_count * 100, 1)
+        value = f"{pass_rate}%"
+        eligible_summary = f"{passed} / {eligible_count} eligible passed"
+        color = "#2ecc71" if pass_rate >= 50 else "#e74c3c"
+    else:
+        value = "N/A"
+        eligible_summary = "No eligible generations"
+        color = "#5dade2"
+
+    nonzero_exceptions = [(name, count) for name, count in exception_counts if count]
+    if not nonzero_exceptions:
+        exception_summary = "No generation errors"
+    elif len(nonzero_exceptions) > 1:
+        exception_summary = f"{sum(count for _, count in nonzero_exceptions)} run exceptions"
+    else:
+        name, count = nonzero_exceptions[0]
+        labels = {
+            "ineligible": "ineligible",
+            "generation_error": "generation error" if count == 1 else "generation errors",
+            "rate_limited": "rate limited",
+            "check_error": "check error" if count == 1 else "check errors",
+        }
+        exception_summary = f"{count} {labels[name]}"
+
+    return value, eligible_summary, exception_summary, color
+
+
 # Plotly textposition options mapped to angles (degrees, counter-clockwise from +x axis).
 # The label is placed in the direction of the angle relative to the marker.
 _TEXT_POSITIONS = [
@@ -2208,6 +2238,8 @@ def make_metric_card(title, value, subtitle="", color="#5dade2"):
     Returns:
         dbc.Card: Dash Bootstrap card component.
     """
+    subtitles = subtitle if isinstance(subtitle, (list, tuple)) else [subtitle]
+
     return dbc.Card(
         dbc.CardBody(
             [
@@ -2225,7 +2257,11 @@ def make_metric_card(title, value, subtitle="", color="#5dade2"):
                     className="mb-0",
                     style={"color": color, "fontWeight": "bold"},
                 ),
-                html.Small(subtitle, style={"color": "#666"}) if subtitle else None,
+                *[
+                    html.Small(line, style={"color": "#999", "display": "block"})
+                    for line in subtitles
+                    if line
+                ],
             ]
         ),
         style={
@@ -2482,12 +2518,22 @@ def create_app(run_path):
         eligible = _eligible_overall_rows(filtered)
         passed = int(eligible["overall_pass"].sum())
         statuses = _overall_statuses(filtered)
-        validation_failed = int((statuses == "failed").sum())
         ineligible = int((statuses == "ineligible").sum())
         failed_gen = int((statuses == "generation_error").sum())
         rate_limited = int((statuses == "rate_limited").sum())
         check_errors = int((statuses == "check_error").sum())
-        pass_rate = round(passed / len(eligible) * 100, 1) if len(eligible) > 0 else 0
+        pass_rate_value, eligible_summary, exception_summary, pass_rate_color = (
+            _format_pass_rate_summary(
+                passed,
+                len(eligible),
+                [
+                    ("ineligible", ineligible),
+                    ("generation_error", failed_gen),
+                    ("rate_limited", rate_limited),
+                    ("check_error", check_errors),
+                ],
+            )
+        )
         total_cost = filtered["cost"].sum()
         known_costs = int(filtered["cost"].notna().sum())
         avg_latency = filtered["api_latency"].mean()
@@ -2514,11 +2560,9 @@ def create_app(run_path):
                         dbc.Col(
                             make_metric_card(
                                 "Pass Rate",
-                                f"{pass_rate}%",
-                                f"{passed} passed / {validation_failed} failed / "
-                                f"{ineligible} ineligible / {failed_gen} generation errors / "
-                                f"{rate_limited} rate limited / {check_errors} check errors",
-                                color="#2ecc71" if pass_rate >= 50 else "#e74c3c",
+                                pass_rate_value,
+                                [eligible_summary, exception_summary],
+                                color=pass_rate_color,
                             ),
                             md=2,
                         ),
@@ -2934,7 +2978,18 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
     generation_errors = int((statuses == "generation_error").sum())
     rate_limited = int((statuses == "rate_limited").sum())
     check_errors = int((statuses == "check_error").sum())
-    pass_rate = round(passed / len(eligible) * 100, 1) if len(eligible) > 0 else 0
+    pass_rate_value, eligible_summary, exception_summary, pass_rate_color = (
+        _format_pass_rate_summary(
+            passed,
+            len(eligible),
+            [
+                ("ineligible", ineligible),
+                ("generation_error", generation_errors),
+                ("rate_limited", rate_limited),
+                ("check_error", check_errors),
+            ],
+        )
+    )
     total_reported_cost = df["cost"].sum()
     known_costs = int(df["cost"].notna().sum())
     escaped_run_name = escape(str(run_name))
@@ -2968,7 +3023,7 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
     <p style="color: #666">Run: {escaped_timestamp} | {total} generations | {len(df["model"].unique())} models</p>
     <div class="stats">
         <div class="stat-card"><div class="label">Total</div><div class="value">{total}</div></div>
-        <div class="stat-card"><div class="label">Pass Rate</div><div class="value" style="color: {"#2ecc71" if pass_rate >= 50 else "#e74c3c"}">{pass_rate}%</div><div class="label">{passed}/{len(eligible)} eligible</div></div>
+        <div class="stat-card"><div class="label">Pass Rate</div><div class="value" style="color: {pass_rate_color}">{pass_rate_value}</div><div class="label">{eligible_summary}</div><div class="label">{exception_summary}</div></div>
         <div class="stat-card"><div class="label">Outcomes</div><div class="value">{passed} / {validation_failed}</div><div class="label">passed / failed</div><div class="label">{ineligible} ineligible / {generation_errors} generation errors / {rate_limited} rate limited / {check_errors} check errors</div></div>
         <div class="stat-card"><div class="label">Total Reported Cost</div><div class="value">${total_reported_cost:.4f}</div><div class="label">{known_costs}/{total} costs reported</div></div>
     </div>
