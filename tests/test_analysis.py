@@ -56,8 +56,18 @@ def test_format_pass_rate_summary_uses_compact_outcome_text():
 def test_metric_charts_exclude_unknown_costs_and_failed_latencies():
     df = pd.DataFrame(
         [
-            {"model": "reported", "cost": 0.5, "api_latency": 2.0, "overall_pass": True},
-            {"model": "unknown", "cost": None, "api_latency": None, "overall_pass": False},
+            {
+                "model": "reported",
+                "cost": 0.5,
+                "api_latency": 2.0,
+                "overall_pass": True,
+            },
+            {
+                "model": "unknown",
+                "cost": None,
+                "api_latency": None,
+                "overall_pass": False,
+            },
         ]
     )
 
@@ -78,7 +88,9 @@ def test_latency_vs_pass_uses_all_attempts_for_pass_rate():
     trace = build_latency_vs_pass(df).data[0]
     stats = {
         model: (latency, pass_rate)
-        for model, latency, pass_rate in zip(trace.customdata, trace.x, trace.y, strict=True)
+        for model, latency, pass_rate in zip(
+            trace.customdata, trace.x, trace.y, strict=True
+        )
     }
 
     assert stats == {"alpha": (2.0, 50.0), "beta": (4.0, 0.0)}
@@ -273,8 +285,12 @@ def test_load_run_flattens_new_check_results(tmp_path):
     assert [bar["bar"] for bar in row["chord_progression_failed_bars"]] == [2]
     assert row["harmonic_rhythm_missing_onsets"] == [8.0]
     assert row["harmonic_rhythm_unexpected_onsets"] == [6.0]
-    assert row["chord_event_positions_missing"] == [{"start_beat": 8.0, "end_beat": 12.0}]
-    assert row["chord_event_positions_unexpected"] == [{"start_beat": 8.0, "end_beat": 10.0}]
+    assert row["chord_event_positions_missing"] == [
+        {"start_beat": 8.0, "end_beat": 12.0}
+    ]
+    assert row["chord_event_positions_unexpected"] == [
+        {"start_beat": 8.0, "end_beat": 10.0}
+    ]
 
 
 def test_load_run_uses_persisted_metadata_with_arbitrary_task_directory_names(tmp_path):
@@ -374,7 +390,10 @@ def test_load_run_excludes_ineligible_results_from_overall_pass_rates(tmp_path):
         {
             "overall_status": "ineligible",
             "scale": {"ran": True, "total": 0, "correct": 0, "incorrect": 0},
-            "duration": {"ran": False, "skipped": "No duration keyword detected in prompt"},
+            "duration": {
+                "ran": False,
+                "skipped": "No duration keyword detected in prompt",
+            },
         },
     )
 
@@ -648,7 +667,9 @@ def test_tradeoff_charts_compact_long_labels_and_keep_full_names_in_hover():
         trace = figure.data[0]
         long_model_index = list(trace.customdata).index(long_model)
         compact_annotation = next(
-            annotation for annotation in figure.layout.annotations if "…" in annotation.text
+            annotation
+            for annotation in figure.layout.annotations
+            if "…" in annotation.text
         )
 
         assert trace.mode == "markers"
@@ -770,7 +791,10 @@ def test_model_variant_order_has_deterministic_fallbacks():
         "alpha (none)",
     ]
     df = pd.DataFrame(
-        [{"model": model, "api_latency": float(index)} for index, model in enumerate(models)]
+        [
+            {"model": model, "api_latency": float(index)}
+            for index, model in enumerate(models)
+        ]
     )
 
     assert [trace.name for trace in build_latency_box(df).data] == [

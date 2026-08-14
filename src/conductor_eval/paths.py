@@ -1,8 +1,8 @@
 """Resolve Conductor Eval's mutable data directories."""
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 PROJECT_ID = "eval"
 PROJECT_DATA_ENV = "CONDUCTOR_EVAL_HOME"
@@ -12,7 +12,9 @@ SUITE_HOME_ENV = "CONDUCTOR_HOME"
 PROJECT_HOME_ENV = PROJECT_DATA_ENV
 
 
-def _environment_path(name: str, environ: Mapping[str, str] | None = None) -> Path | None:
+def _environment_path(
+    name: str, environ: Mapping[str, str] | None = None
+) -> Path | None:
     """Return an expanded environment path when the variable is set."""
     env = os.environ if environ is None else environ
     value = env.get(name)

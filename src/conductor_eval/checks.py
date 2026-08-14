@@ -38,13 +38,15 @@ def scale_test(midi, root, scale):
     # Validate root and scale.
     try:
         root_pc = note_name_to_pitch_class(root)
-    except ValueError:
-        raise ValueError(f"Invalid root note: {root}")
+    except ValueError as exc:
+        raise ValueError(f"Invalid root note: {root}") from exc
     if scale.lower() not in SCALE_INTERVALS:
         raise ValueError(f"Invalid scale mode: {scale.lower()}")
 
     # Determine the acceptable pitch classes for the given scale.
-    acceptable_pcs = [(root_pc + interval) % 12 for interval in SCALE_INTERVALS[scale.lower()]]
+    acceptable_pcs = [
+        (root_pc + interval) % 12 for interval in SCALE_INTERVALS[scale.lower()]
+    ]
     # print(f"Root Note: {root}, Scale Mode: {scale}, Acceptable Pitch Classes: {acceptable_pcs}")
 
     correct = 0
@@ -65,7 +67,7 @@ def scale_test(midi, root, scale):
             incorrect += 1
             incorrect_pitches.add(pitch_class)
 
-    results = {
+    return {
         "total": total,
         "correct": correct,
         "incorrect": incorrect,
@@ -74,7 +76,6 @@ def scale_test(midi, root, scale):
             "incorrect": list(incorrect_pitches),
         },
     }
-    return results
 
 
 def duration_test(midi, duration):
@@ -92,7 +93,9 @@ def duration_test(midi, duration):
         raise ValueError(f"Invalid duration: {duration}")
 
     ticks_per_beat = midi.ticks_per_beat
-    expected_ticks = beats_to_ticks(DURATION_BEATS[duration], ticks_per_beat, "duration")
+    expected_ticks = beats_to_ticks(
+        DURATION_BEATS[duration], ticks_per_beat, "duration"
+    )
     # print(f"Expected duration in ticks: {expected_ticks}")
 
     total = 0
@@ -108,13 +111,12 @@ def duration_test(midi, duration):
             incorrect_lengths[ratio] = incorrect_lengths.get(ratio, 0) + 1
         else:
             correct += 1
-    results = {
+    return {
         "total": total,
         "correct": correct,
         "incorrect": incorrect,
         "lengths": incorrect_lengths,
     }
-    return results
 
 
 def monophony_test(midi):
@@ -129,7 +131,11 @@ def monophony_test(midi):
 
 def polyphony_test(midi, min_voices=2):
     """Test whether the MIDI reaches a requested number of simultaneous voices."""
-    if not isinstance(min_voices, int) or isinstance(min_voices, bool) or min_voices < 2:
+    if (
+        not isinstance(min_voices, int)
+        or isinstance(min_voices, bool)
+        or min_voices < 2
+    ):
         raise ValueError("min_voices must be an integer greater than or equal to 2")
 
     profile = calculate_polyphony_profile(midi)
@@ -159,7 +165,9 @@ def _resolve_diatonic_triads(root, scale, progression):
     for numeral in progression:
         if not isinstance(numeral, str) or numeral.upper() not in _ROMAN_DEGREES:
             supported = ", ".join(_ROMAN_DEGREES)
-            raise ValueError(f"Unsupported Roman numeral {numeral!r}; expected one of: {supported}")
+            raise ValueError(
+                f"Unsupported Roman numeral {numeral!r}; expected one of: {supported}"
+            )
         degree = _ROMAN_DEGREES[numeral.upper()]
         pitch_classes = {
             scale_pcs[degree],
@@ -185,7 +193,9 @@ def chord_progression_test(
     """
     if not isinstance(strict, bool):
         raise ValueError("strict must be a boolean")
-    chord_ticks = beats_to_ticks(beats_per_chord, midi.ticks_per_beat, "beats_per_chord")
+    chord_ticks = beats_to_ticks(
+        beats_per_chord, midi.ticks_per_beat, "beats_per_chord"
+    )
     if chord_ticks == 0:
         raise ValueError("beats_per_chord must be greater than zero")
 
@@ -196,7 +206,9 @@ def chord_progression_test(
     for index, (numeral, expected_pcs) in enumerate(expected_chords):
         onset_tick = index * chord_ticks
         actual_pcs = {
-            note.pitch % 12 for note in intervals if note.start_tick <= onset_tick < note.end_tick
+            note.pitch % 12
+            for note in intervals
+            if note.start_tick <= onset_tick < note.end_tick
         }
         missing = expected_pcs - actual_pcs
         extra = actual_pcs - expected_pcs
@@ -226,7 +238,8 @@ def harmonic_rhythm_test(midi, expected_onsets):
     if not isinstance(expected_onsets, list) or not expected_onsets:
         raise ValueError("expected_onsets must be a non-empty list")
     expected_ticks = {
-        beats_to_ticks(beat, midi.ticks_per_beat, "expected_onsets") for beat in expected_onsets
+        beats_to_ticks(beat, midi.ticks_per_beat, "expected_onsets")
+        for beat in expected_onsets
     }
     if len(expected_ticks) != len(expected_onsets):
         raise ValueError("expected_onsets must contain unique beat positions")
@@ -252,10 +265,12 @@ def chord_event_positions_test(midi, expected_starts, expected_ends):
     if not isinstance(expected_starts, list) or not isinstance(expected_ends, list):
         raise ValueError("expected_starts and expected_ends must be lists")
     if not expected_starts or len(expected_starts) != len(expected_ends):
-        raise ValueError("expected_starts and expected_ends must have the same non-zero length")
+        raise ValueError(
+            "expected_starts and expected_ends must have the same non-zero length"
+        )
 
     expected_pairs = set()
-    for start, end in zip(expected_starts, expected_ends):
+    for start, end in zip(expected_starts, expected_ends, strict=True):
         start_tick = beats_to_ticks(start, midi.ticks_per_beat, "expected_starts")
         end_tick = beats_to_ticks(end, midi.ticks_per_beat, "expected_ends")
         if end_tick <= start_tick:
