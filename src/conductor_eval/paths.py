@@ -1,8 +1,8 @@
 """Resolve Conductor Eval's mutable data directories."""
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 PROJECT_ID = "eval"
 PROJECT_DATA_ENV = "CONDUCTOR_EVAL_HOME"

@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 import sys
 from collections import defaultdict
 from html import escape
@@ -36,10 +35,10 @@ def apply_plotly_theme(fig):
     fig.update_layout(
         paper_bgcolor=PLOTLY_BG,
         plot_bgcolor=PLOTLY_BG,
-        font=dict(color=PLOTLY_TEXT, family="Segoe UI, sans-serif"),
-        xaxis=dict(gridcolor=PLOTLY_GRID, zerolinecolor=PLOTLY_GRID),
-        yaxis=dict(gridcolor=PLOTLY_GRID, zerolinecolor=PLOTLY_GRID),
-        margin=dict(l=60, r=30, t=50, b=60),
+        font={"color": PLOTLY_TEXT, "family": "Segoe UI, sans-serif"},
+        xaxis={"gridcolor": PLOTLY_GRID, "zerolinecolor": PLOTLY_GRID},
+        yaxis={"gridcolor": PLOTLY_GRID, "zerolinecolor": PLOTLY_GRID},
+        margin={"l": 60, "r": 30, "t": 50, "b": 60},
     )
     return fig
 
@@ -431,7 +430,7 @@ def _add_scatter_labels(
             standoff=5,
             bgcolor="rgba(26, 26, 46, 0.88)",
             borderpad=1,
-            font=dict(size=11, color=PLOTLY_TEXT),
+            font={"size": 11, "color": PLOTLY_TEXT},
         )
 
 
@@ -462,14 +461,14 @@ def load_run(run_path):
 
     # Load config
     config_path = run_path / "config.json"
-    with open(config_path, "r", encoding="utf-8") as f:
+    with config_path.open(encoding="utf-8") as f:
         config = json.load(f)
 
     # Load summary
     summary_path = run_path / "summary.json"
     summary = {}
     if summary_path.exists():
-        with open(summary_path, "r", encoding="utf-8") as f:
+        with summary_path.open(encoding="utf-8") as f:
             summary = json.load(f)
 
     # Collect all test_results.json files
@@ -480,7 +479,7 @@ def load_run(run_path):
         return pd.DataFrame(), config, summary
 
     for tr_path in results_dir.rglob("test_results.json"):
-        with open(tr_path, "r", encoding="utf-8") as f:
+        with tr_path.open(encoding="utf-8") as f:
             result = json.load(f)
 
         # Result metadata is authoritative; task directory names have no semantics.
@@ -636,7 +635,7 @@ def load_run(run_path):
             def _instance_name(row):
                 if row["effort"] is not None and pd.notna(row["effort"]):
                     return f"{row['base_model']} ({row['effort']})"
-                elif row["use_thinking"]:
+                if row["use_thinking"]:
                     return f"{row['base_model']} (reasoning)"
                 return row["base_model"]
 
@@ -673,8 +672,7 @@ def list_available_runs(base_dir=None):
     base = get_evaluations_dir() if base_dir is None else Path(base_dir)
     if not base.exists():
         return []
-    runs = [d for d in sorted(base.iterdir()) if d.is_dir() and (d / "config.json").exists()]
-    return runs
+    return [d for d in sorted(base.iterdir()) if d.is_dir() and (d / "config.json").exists()]
 
 
 def select_run_interactive(base_dir=None):
@@ -699,14 +697,14 @@ def select_run_interactive(base_dir=None):
     for i, run in enumerate(runs, 1):
         # Try to load config for a nice display
         try:
-            with open(run / "config.json", "r") as f:
+            with (run / "config.json").open() as f:
                 cfg = json.load(f)
             name = cfg.get("run_name", run.name)
             ts = cfg.get("timestamp", "")
             models = [m[1] if isinstance(m, list) else m for m in cfg.get("models", [])]
             model_count = len(models)
             print(f"  [{i}] {name}  ({ts}, {model_count} models)")
-        except Exception:
+        except Exception:  # noqa: PERF203 - each malformed run should be skipped independently
             print(f"  [{i}] {run.name}")
     print("-" * 60)
 
@@ -717,7 +715,7 @@ def select_run_interactive(base_dir=None):
             if 0 <= idx < len(runs):
                 return runs[idx]
             print(f"Please enter a number between 1 and {len(runs)}")
-        except (ValueError, EOFError):
+        except (ValueError, EOFError):  # noqa: PERF203 - retrying user input requires this loop
             print("Invalid input. Please enter a number.")
 
 
@@ -750,9 +748,11 @@ def _rate_labels_and_counts(rates, numerators, denominators):
     """Return consistent rate labels and Plotly customdata count pairs."""
     labels = [
         f"{rate:.1f}% ({int(numerator)}/{int(denominator)})"
-        for rate, numerator, denominator in zip(rates, numerators, denominators)
+        for rate, numerator, denominator in zip(rates, numerators, denominators, strict=False)
     ]
-    counts = list(zip(pd.Series(numerators).astype(int), pd.Series(denominators).astype(int)))
+    counts = list(
+        zip(pd.Series(numerators).astype(int), pd.Series(denominators).astype(int), strict=False)
+    )
     return labels, counts
 
 
@@ -815,8 +815,8 @@ def build_pass_rate_by_model(df):
         title="Overall Pass Rate by Model",
         xaxis_title="Pass Rate (%)",
         yaxis_title="",
-        xaxis=dict(range=[0, 105]),
-        yaxis=dict(autorange="reversed"),
+        xaxis={"range": [0, 105]},
+        yaxis={"autorange": "reversed"},
     )
     return apply_plotly_theme(fig)
 
@@ -831,9 +831,9 @@ def _empty_performance_figure(title, message):
         xref="paper",
         yref="paper",
         showarrow=False,
-        font=dict(color=PLOTLY_TEXT, size=14),
+        font={"color": PLOTLY_TEXT, "size": 14},
     )
-    fig.update_layout(title=title, xaxis=dict(visible=False), yaxis=dict(visible=False))
+    fig.update_layout(title=title, xaxis={"visible": False}, yaxis={"visible": False})
     return apply_plotly_theme(fig)
 
 
@@ -868,7 +868,7 @@ def _finish_check_pass_rate_figure(fig, title):
         title=title,
         xaxis_title="Model",
         yaxis_title="Pass Rate (%)",
-        yaxis=dict(range=[0, 105]),
+        yaxis={"range": [0, 105]},
     )
     return apply_plotly_theme(fig)
 
@@ -987,14 +987,14 @@ def build_model_root_heatmap(df):
             colorscale="RdYlGn",
             zmin=0,
             zmax=100,
-            colorbar=dict(title="Pass %"),
+            colorbar={"title": "Pass %"},
         )
     )
     fig.update_layout(
         title="Pass Rate: Model x Root",
         xaxis_title="Root",
         yaxis_title="Model",
-        yaxis=dict(autorange="reversed"),
+        yaxis={"autorange": "reversed"},
     )
     return apply_plotly_theme(fig)
 
@@ -1068,7 +1068,7 @@ def build_major_vs_minor_by_model(df):
         title="Major vs Minor Pass Rate by Model",
         xaxis_title="Model",
         yaxis_title="Pass Rate (%)",
-        yaxis=dict(range=[0, 105]),
+        yaxis={"range": [0, 105]},
     )
     return apply_plotly_theme(fig)
 
@@ -1115,7 +1115,7 @@ def build_root_pass_rate(df):
         title="Pass Rate by Root Note",
         xaxis_title="Root Note",
         yaxis_title="Pass Rate (%)",
-        yaxis=dict(range=[0, 105]),
+        yaxis={"range": [0, 105]},
     )
     return apply_plotly_theme(fig)
 
@@ -1189,7 +1189,7 @@ def build_root_scale_grouped(df):
         title="Pass Rate by Root Note (Major vs Minor)",
         xaxis_title="Root Note",
         yaxis_title="Pass Rate (%)",
-        yaxis=dict(range=[0, 105]),
+        yaxis={"range": [0, 105]},
     )
     return apply_plotly_theme(fig)
 
@@ -1253,14 +1253,14 @@ def build_root_scale_heatmap(df):
             colorscale="RdYlGn",
             zmin=0,
             zmax=100,
-            colorbar=dict(title="Pass %"),
+            colorbar={"title": "Pass %"},
         )
     )
     fig.update_layout(
         title="Pass Rate: Model x Root+Scale",
         xaxis_title="Root + Scale",
         yaxis_title="Model",
-        yaxis=dict(autorange="reversed"),
+        yaxis={"autorange": "reversed"},
     )
     return apply_plotly_theme(fig)
 
@@ -1345,10 +1345,10 @@ def build_latency_vs_pass(df):
                 "Model: %{customdata}<br>Average latency: %{x:.2f}s<br>"
                 "Pass rate: %{y:.1f}%<extra></extra>"
             ),
-            marker=dict(
-                size=stats["latency_count"] / stats["latency_count"].max() * 30 + 10,
-                color=[MODEL_COLORS[i % len(MODEL_COLORS)] for i in range(len(stats))],
-            ),
+            marker={
+                "size": stats["latency_count"] / stats["latency_count"].max() * 30 + 10,
+                "color": [MODEL_COLORS[i % len(MODEL_COLORS)] for i in range(len(stats))],
+            },
         )
     )
     _add_scatter_labels(
@@ -1363,8 +1363,8 @@ def build_latency_vs_pass(df):
         title="Latency vs Pass Rate by Model",
         xaxis_title="Average Latency (seconds)",
         yaxis_title="Pass Rate (%)",
-        xaxis=dict(range=list(x_bounds)),
-        yaxis=dict(range=[0, 105]),
+        xaxis={"range": list(x_bounds)},
+        yaxis={"range": [0, 105]},
     )
     return apply_plotly_theme(fig)
 
@@ -1398,7 +1398,7 @@ def build_cost_by_model(df):
         fig.add_annotation(
             text="All costs are $0 (local models)",
             showarrow=False,
-            font=dict(size=16, color=PLOTLY_TEXT),
+            font={"size": 16, "color": PLOTLY_TEXT},
         )
         fig.update_layout(title="Cost Analysis")
         return apply_plotly_theme(fig)
@@ -1422,7 +1422,7 @@ def build_cost_by_model(df):
         title="Total Cost by Model",
         xaxis_title="Total Cost ($)",
         yaxis_title="",
-        yaxis=dict(autorange="reversed"),
+        yaxis={"autorange": "reversed"},
     )
     return apply_plotly_theme(fig)
 
@@ -1461,7 +1461,7 @@ def build_cost_vs_pass(df):
         fig.add_annotation(
             text="All costs are $0 (local models)",
             showarrow=False,
-            font=dict(size=16, color=PLOTLY_TEXT),
+            font={"size": 16, "color": PLOTLY_TEXT},
         )
         fig.update_layout(title="Cost vs Pass Rate")
         return apply_plotly_theme(fig)
@@ -1481,10 +1481,10 @@ def build_cost_vs_pass(df):
                 "Model: %{customdata}<br>Cost per generation: $%{x:.5f}<br>"
                 "Pass rate: %{y:.1f}%<extra></extra>"
             ),
-            marker=dict(
-                size=15,
-                color=[MODEL_COLORS[i % len(MODEL_COLORS)] for i in range(len(stats))],
-            ),
+            marker={
+                "size": 15,
+                "color": [MODEL_COLORS[i % len(MODEL_COLORS)] for i in range(len(stats))],
+            },
         )
     )
     _add_scatter_labels(
@@ -1499,8 +1499,8 @@ def build_cost_vs_pass(df):
         title="Cost per Generation vs Pass Rate",
         xaxis_title="Cost per Generation ($)",
         yaxis_title="Pass Rate (%)",
-        xaxis=dict(range=list(x_bounds)),
-        yaxis=dict(range=[0, 105]),
+        xaxis={"range": list(x_bounds)},
+        yaxis={"range": [0, 105]},
     )
     return apply_plotly_theme(fig)
 
@@ -1534,14 +1534,14 @@ def build_incorrect_pitches_by_model(df):
         fig.add_annotation(
             text="No incorrect pitches found",
             showarrow=False,
-            font=dict(size=16, color=PLOTLY_TEXT),
+            font={"size": 16, "color": PLOTLY_TEXT},
         )
         fig.update_layout(title="Incorrect Pitches by Model")
         return apply_plotly_theme(fig)
 
     # Build grouped bar chart
     all_notes = sorted(
-        set(n for counts in model_pitch_counts.values() for n in counts),
+        {n for counts in model_pitch_counts.values() for n in counts},
         key=lambda n: NOTE_NAMES.index(n) if n in NOTE_NAMES else 99,
     )
     fig = go.Figure()
@@ -1551,7 +1551,7 @@ def build_incorrect_pitches_by_model(df):
         total = sum(values)
         customdata = [
             [note_name_to_pitch_class(note), round(count / total * 100, 1) if total else 0]
-            for note, count in zip(all_notes, values)
+            for note, count in zip(all_notes, values, strict=False)
         ]
         fig.add_trace(
             go.Bar(
@@ -1609,7 +1609,7 @@ def build_incorrect_intervals_by_model(df):
         fig.add_annotation(
             text="No incorrect intervals found",
             showarrow=False,
-            font=dict(size=16, color=PLOTLY_TEXT),
+            font={"size": 16, "color": PLOTLY_TEXT},
         )
         fig.update_layout(title="Incorrect Intervals by Model")
         return apply_plotly_theme(fig)
@@ -1628,7 +1628,7 @@ def build_incorrect_intervals_by_model(df):
         total = sum(values)
         customdata = [
             [INTERVAL_NAMES.index(interval), round(count / total * 100, 1) if total else 0]
-            for interval, count in zip(all_intervals, values)
+            for interval, count in zip(all_intervals, values, strict=False)
         ]
         fig.add_trace(
             go.Bar(
@@ -1686,7 +1686,7 @@ def build_duration_errors_by_model(df):
         fig.add_annotation(
             text="No duration errors found",
             showarrow=False,
-            font=dict(size=16, color=PLOTLY_TEXT),
+            font={"size": 16, "color": PLOTLY_TEXT},
         )
         fig.update_layout(title="Duration Errors by Model")
         return apply_plotly_theme(fig)
@@ -1747,17 +1747,17 @@ def build_effort_impact_delta(df):
         fig.add_annotation(
             text="No effort-level data in this run",
             showarrow=False,
-            font=dict(size=16, color=PLOTLY_TEXT),
+            font={"size": 16, "color": PLOTLY_TEXT},
         )
         fig.update_layout(title="Effort Level Impact")
         return apply_plotly_theme(fig)
 
     # Define a canonical effort ordering so we can identify "lowest" and "highest"
-    EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    effort_order = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
     def effort_rank(e):
         e_lower = str(e).lower()
-        return EFFORT_ORDER.index(e_lower) if e_lower in EFFORT_ORDER else len(EFFORT_ORDER)
+        return effort_order.index(e_lower) if e_lower in effort_order else len(effort_order)
 
     # Per (base_model, effort) pass rate
     stats = (
@@ -1797,7 +1797,7 @@ def build_effort_impact_delta(df):
         fig.add_annotation(
             text="No models with multiple effort levels",
             showarrow=False,
-            font=dict(size=16, color=PLOTLY_TEXT),
+            font={"size": 16, "color": PLOTLY_TEXT},
         )
         fig.update_layout(title="Effort Level Impact")
         return apply_plotly_theme(fig)
@@ -1818,6 +1818,7 @@ def build_effort_impact_delta(df):
                     result["lowest_effort"],
                     result["highest_rate"],
                     result["highest_effort"],
+                    strict=False,
                 )
             ],
             textposition="auto",
@@ -1829,6 +1830,7 @@ def build_effort_impact_delta(df):
                     result["highest_effort"],
                     result["highest_rate"],
                     result["highest_count"],
+                    strict=False,
                 )
             ),
             hovertemplate=(
@@ -1882,7 +1884,7 @@ def build_reasoning_toggle_comparison(df):
         fig.add_annotation(
             text="No toggle-based reasoning models in this run",
             showarrow=False,
-            font=dict(size=16, color=PLOTLY_TEXT),
+            font={"size": 16, "color": PLOTLY_TEXT},
         )
         fig.update_layout(title="Standard vs Reasoning Toggle")
         return apply_plotly_theme(fig)
@@ -1938,7 +1940,7 @@ def build_reasoning_toggle_comparison(df):
             orientation="h",
             text=[f"{v}%" for v in std_rates],
             textposition="auto",
-            customdata=list(zip(std_passed, std_counts)),
+            customdata=list(zip(std_passed, std_counts, strict=False)),
             hovertemplate=_rate_hover_template(
                 "Model: %{y}<br>Mode: Standard",
                 rate_value="%{x:.1f}",
@@ -1958,7 +1960,7 @@ def build_reasoning_toggle_comparison(df):
             orientation="h",
             text=[f"{v}%" for v in reas_rates],
             textposition="auto",
-            customdata=list(zip(reas_passed, reas_counts)),
+            customdata=list(zip(reas_passed, reas_counts, strict=False)),
             hovertemplate=_rate_hover_template(
                 "Model: %{y}<br>Mode: Reasoning",
                 rate_value="%{x:.1f}",
@@ -2097,7 +2099,7 @@ def build_reasoning_cost_effectiveness(df):
         fig.add_annotation(
             text="All costs are $0 (local models)",
             showarrow=False,
-            font=dict(size=16, color=PLOTLY_TEXT),
+            font={"size": 16, "color": PLOTLY_TEXT},
         )
         fig.update_layout(title="Reasoning Cost-Effectiveness")
         return apply_plotly_theme(fig)
@@ -2123,7 +2125,7 @@ def build_reasoning_cost_effectiveness(df):
                     x=bm_stats["cost_per_gen"],
                     y=bm_stats["pass_rate_pct"],
                     mode="lines",
-                    line=dict(color=color_map[base], width=1.5, dash="dot"),
+                    line={"color": color_map[base], "width": 1.5, "dash": "dot"},
                     showlegend=False,
                     hoverinfo="skip",
                 )
@@ -2144,6 +2146,7 @@ def build_reasoning_cost_effectiveness(df):
                         bm_stats["passed"].astype(int),
                         bm_stats["eligible"].astype(int),
                         bm_stats["costed"].astype(int),
+                        strict=False,
                     )
                 ),
                 hovertemplate=(
@@ -2152,7 +2155,7 @@ def build_reasoning_cost_effectiveness(df):
                     "Eligible generations: %{customdata[2]}<br>"
                     "Costed generations: %{customdata[3]}<extra></extra>"
                 ),
-                marker=dict(size=12, color=color_map[base]),
+                marker={"size": 12, "color": color_map[base]},
             )
         )
 
@@ -2168,8 +2171,8 @@ def build_reasoning_cost_effectiveness(df):
         title="Reasoning Cost-Effectiveness (Cost per Generation vs Pass Rate)",
         xaxis_title="Cost per Generation ($)",
         yaxis_title="Pass Rate (%)",
-        xaxis=dict(range=list(x_bounds)),
-        yaxis=dict(range=[0, 105]),
+        xaxis={"range": list(x_bounds)},
+        yaxis={"range": [0, 105]},
     )
     return apply_plotly_theme(fig)
 
@@ -2220,8 +2223,8 @@ def build_failure_rate_by_model(df):
         title="Generation Failure Rate by Model",
         xaxis_title="Failure Rate (%)",
         yaxis_title="",
-        xaxis=dict(range=[0, max(stats["error_rate"].max() * 1.2, 10)]),
-        yaxis=dict(autorange="reversed"),
+        xaxis={"range": [0, max(stats["error_rate"].max() * 1.2, 10)]},
+        yaxis={"autorange": "reversed"},
     )
     return apply_plotly_theme(fig)
 
@@ -2683,7 +2686,7 @@ def create_app(run_path):
             ]
         )
 
-    @app.callback(  # noqa: E303
+    @app.callback(
         Output("tab-latency-content", "children"),
         [
             Input("filter-models", "value"),
@@ -2943,7 +2946,7 @@ def create_app(run_path):
         # Build combined dashboard HTML
         combined_html = _build_combined_html(figures, run_name, timestamp, totals, df)
         combined_path = export_dir / "dashboard.html"
-        with open(combined_path, "w", encoding="utf-8") as f:
+        with combined_path.open("w", encoding="utf-8") as f:
             f.write(combined_html)
 
         return dbc.Alert(
@@ -3035,12 +3038,12 @@ def _build_combined_html(figures, run_name, timestamp, totals, df):
 def main():
     """Entry point. Parses CLI args or prompts for run selection, then launches the dashboard."""
     if len(sys.argv) > 1:
-        run_path = sys.argv[1]
+        run_path = Path(sys.argv[1])
         # Support both full path and just run name
-        if not os.path.isdir(run_path):
+        if not run_path.is_dir():
             # Try the evaluator's default output directory.
             candidate = get_evaluations_dir() / run_path
-            if os.path.isdir(candidate):
+            if candidate.is_dir():
                 run_path = candidate
             else:
                 print(f"Run directory not found: {run_path}")

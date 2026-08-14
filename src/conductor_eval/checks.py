@@ -38,8 +38,8 @@ def scale_test(midi, root, scale):
     # Validate root and scale.
     try:
         root_pc = note_name_to_pitch_class(root)
-    except ValueError:
-        raise ValueError(f"Invalid root note: {root}")
+    except ValueError as exc:
+        raise ValueError(f"Invalid root note: {root}") from exc
     if scale.lower() not in SCALE_INTERVALS:
         raise ValueError(f"Invalid scale mode: {scale.lower()}")
 
@@ -65,7 +65,7 @@ def scale_test(midi, root, scale):
             incorrect += 1
             incorrect_pitches.add(pitch_class)
 
-    results = {
+    return {
         "total": total,
         "correct": correct,
         "incorrect": incorrect,
@@ -74,7 +74,6 @@ def scale_test(midi, root, scale):
             "incorrect": list(incorrect_pitches),
         },
     }
-    return results
 
 
 def duration_test(midi, duration):
@@ -108,13 +107,12 @@ def duration_test(midi, duration):
             incorrect_lengths[ratio] = incorrect_lengths.get(ratio, 0) + 1
         else:
             correct += 1
-    results = {
+    return {
         "total": total,
         "correct": correct,
         "incorrect": incorrect,
         "lengths": incorrect_lengths,
     }
-    return results
 
 
 def monophony_test(midi):
@@ -255,7 +253,7 @@ def chord_event_positions_test(midi, expected_starts, expected_ends):
         raise ValueError("expected_starts and expected_ends must have the same non-zero length")
 
     expected_pairs = set()
-    for start, end in zip(expected_starts, expected_ends):
+    for start, end in zip(expected_starts, expected_ends, strict=True):
         start_tick = beats_to_ticks(start, midi.ticks_per_beat, "expected_starts")
         end_tick = beats_to_ticks(end, midi.ticks_per_beat, "expected_ends")
         if end_tick <= start_tick:

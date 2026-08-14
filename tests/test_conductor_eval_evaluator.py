@@ -2,7 +2,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -299,8 +299,8 @@ def test_save_results_uses_unique_safe_task_directory(tmp_path):
 
 def test_create_run_directory_returns_compact_authoritative_metadata(tmp_path, monkeypatch):
     evaluator = Evaluator(output_dir=tmp_path / "evaluations")
-    frozen_time = datetime(2026, 7, 28, 12, 34, 56, 789012)
-    monkeypatch.setattr(evaluator_module, "datetime", SimpleNamespace(now=lambda: frozen_time))
+    frozen_time = datetime(2026, 7, 28, 12, 34, 56, 789012, tzinfo=timezone.utc)
+    monkeypatch.setattr(evaluator_module, "datetime", SimpleNamespace(now=lambda _tz: frozen_time))
     monkeypatch.setattr(
         evaluator_module,
         "uuid4",
@@ -320,7 +320,9 @@ def test_create_run_directory_fails_for_exact_collision(tmp_path, monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "datetime",
-        SimpleNamespace(now=lambda: datetime(2026, 7, 28, 12, 34, 56, 789012)),
+        SimpleNamespace(
+            now=lambda _tz: datetime(2026, 7, 28, 12, 34, 56, 789012, tzinfo=timezone.utc)
+        ),
     )
     monkeypatch.setattr(
         evaluator_module,

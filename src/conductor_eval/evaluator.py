@@ -14,9 +14,9 @@ import json
 import logging
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Union
+from typing import ClassVar
 from uuid import uuid4
 
 from conductor_core import EngineConfig, GenerationRequest, LoopGenerationEngine
@@ -132,10 +132,10 @@ class Evaluator:
         AVAILABLE_TESTS: Registry of available test functions
     """
 
-    SCALES = ["major", "minor"]
+    SCALES: ClassVar[list[str]] = ["major", "minor"]
     MAX_CLOUD_CONCURRENCY = 4
 
-    AVAILABLE_TESTS = {
+    AVAILABLE_TESTS: ClassVar[dict[str, object]] = {
         "scale": scale_test,
         "duration": duration_test,
         "monophony": monophony_test,
@@ -226,11 +226,11 @@ class Evaluator:
 
     def evaluate(
         self,
-        prompts: Union[str, list[str]],
+        prompts: str | list[str],
         roots: list[str],
-        models: Union[str, list[str]] = "all",
-        run_name: str = None,
-        tests: list[str] = ["scale", "duration"],
+        models: str | list[str] = "all",
+        run_name: str | None = None,
+        tests: list[str] | None = None,
         test_reasoning: bool = False,
         test_params: dict[str, dict] | None = None,
         max_cloud_concurrency: int = MAX_CLOUD_CONCURRENCY,
@@ -256,6 +256,8 @@ class Evaluator:
         Raises:
             ValueError: If run_name is not provided.
         """
+        if tests is None:
+            tests = ["scale", "duration"]
         if run_name is None:
             raise ValueError("run_name is required")
         if (
@@ -294,7 +296,7 @@ class Evaluator:
                 "temperature": self.temperature,
                 "max_cloud_concurrency": max_cloud_concurrency,
             }
-            with open(run_path / "config.json", "w", encoding="utf-8") as f:
+            with (run_path / "config.json").open("w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
 
             # Generate all task combinations
@@ -334,7 +336,7 @@ class Evaluator:
 
             # Generate and save summary
             summary = self._generate_summary(all_results, config)
-            with open(run_path / "summary.json", "w", encoding="utf-8") as f:
+            with (run_path / "summary.json").open("w", encoding="utf-8") as f:
                 json.dump(summary, f, indent=2)
 
             logger.info("Evaluation complete. Results saved to %s", run_path)
@@ -537,7 +539,7 @@ class Evaluator:
         return validated
 
     def _resolve_models(
-        self, models: Union[str, list[str]], logger: logging.Logger
+        self, models: str | list[str], logger: logging.Logger
     ) -> list[tuple[str, str]]:
         """
         Resolve model specification to (provider, model_name) tuples.
@@ -556,22 +558,22 @@ class Evaluator:
                 # All cloud models from model_list.json
                 for provider in ["OpenAI", "Anthropic", "Google"]:
                     if provider in self.model_info["models"]:
-                        for model in self.model_info["models"][provider].keys():
-                            resolved.append((provider, model))
+                        resolved.extend(
+                            (provider, model) for model in self.model_info["models"][provider]
+                        )
                 # All Ollama models
                 resolved.extend(("Ollama", model) for model in self._discover_ollama_models())
 
             elif models_lower == "openai":
-                for model in self.model_info["models"]["OpenAI"].keys():
-                    resolved.append(("OpenAI", model))
+                resolved.extend(("OpenAI", model) for model in self.model_info["models"]["OpenAI"])
 
             elif models_lower == "anthropic":
-                for model in self.model_info["models"]["Anthropic"].keys():
-                    resolved.append(("Anthropic", model))
+                resolved.extend(
+                    ("Anthropic", model) for model in self.model_info["models"]["Anthropic"]
+                )
 
             elif models_lower == "google":
-                for model in self.model_info["models"]["Google"].keys():
-                    resolved.append(("Google", model))
+                resolved.extend(("Google", model) for model in self.model_info["models"]["Google"])
 
             elif models_lower == "ollama":
                 resolved.extend(("Ollama", model) for model in self._discover_ollama_models())
@@ -612,9 +614,11 @@ class Evaluator:
         """
         # Check cloud providers first
         for provider in ["OpenAI", "Anthropic", "Google"]:
-            if provider in self.model_info["models"]:
-                if model in self.model_info["models"][provider]:
-                    return provider
+            if (
+                provider in self.model_info["models"]
+                and model in self.model_info["models"][provider]
+            ):
+                return provider
 
         if model in self._discover_ollama_models():
             return "Ollama"
@@ -647,9 +651,8 @@ class Evaluator:
         if provider == "Ollama":
             return {"extended_thinking": False, "effort_options": []}
 
-        if provider in self.model_info["models"]:
-            if model in self.model_info["models"][provider]:
-                return self.model_info["models"][provider][model]
+        if provider in self.model_info["models"] and model in self.model_info["models"][provider]:
+            return self.model_info["models"][provider][model]
 
         return {"extended_thinking": False, "effort_options": []}
 
@@ -710,24 +713,24 @@ class Evaluator:
                             test_reasoning=test_reasoning,
                         )
 
-                        for variation in variations:
-                            tasks.append(
-                                {
-                                    "provider": provider,
-                                    "model": model,
-                                    "original_prompt": prompt,
-                                    "full_prompt": full_prompt,
-                                    "root": root,
-                                    "scale": scale,
-                                    "use_thinking": variation["use_thinking"],
-                                    "effort": variation["effort"],
-                                    "variation_name": variation["name"],
-                                    "test_params": {
-                                        name: dict(params)
-                                        for name, params in (test_params or {}).items()
-                                    },
-                                }
-                            )
+                        tasks.extend(
+                            {
+                                "provider": provider,
+                                "model": model,
+                                "original_prompt": prompt,
+                                "full_prompt": full_prompt,
+                                "root": root,
+                                "scale": scale,
+                                "use_thinking": variation["use_thinking"],
+                                "effort": variation["effort"],
+                                "variation_name": variation["name"],
+                                "test_params": {
+                                    name: dict(params)
+                                    for name, params in (test_params or {}).items()
+                                },
+                            }
+                            for variation in variations
+                        )
 
         occurrences: dict[str, int] = {}
         for task in tasks:
@@ -760,25 +763,17 @@ class Evaluator:
 
         if test_reasoning and supports_thinking:
             # For OpenAI reasoning models (o-series), only effort levels matter.
-            if provider == "OpenAI" and supports_thinking:
-                for effort in effort_options:
-                    variations.append(
-                        {
-                            "use_thinking": True,
-                            "effort": effort,
-                            "name": effort,
-                        }
-                    )
-            # For Anthropic/Google, test thinking with effort levels when supported.
-            elif provider in ["Anthropic", "Google"] and effort_options:
-                for effort in effort_options:
-                    variations.append(
-                        {
-                            "use_thinking": True,
-                            "effort": effort,
-                            "name": effort,
-                        }
-                    )
+            if (provider == "OpenAI" and supports_thinking) or (
+                provider in ["Anthropic", "Google"] and effort_options
+            ):
+                variations.extend(
+                    {
+                        "use_thinking": True,
+                        "effort": effort,
+                        "name": effort,
+                    }
+                    for effort in effort_options
+                )
             # For Anthropic/Google with a reasoning toggle but no effort options.
             elif provider in ["Anthropic", "Google"]:
                 variations.append(
@@ -805,15 +800,9 @@ class Evaluator:
                 )
         else:
             # No reasoning testing: use the default effort for effort-based models.
-            if supports_thinking and provider == "OpenAI":
-                variations.append(
-                    {
-                        "use_thinking": True,
-                        "effort": effort_options[0],
-                        "name": effort_options[0],
-                    }
-                )
-            elif effort_options and provider in ["Anthropic", "Google"]:
+            if (supports_thinking and provider == "OpenAI") or (
+                effort_options and provider in ["Anthropic", "Google"]
+            ):
                 variations.append(
                     {
                         "use_thinking": True,
@@ -975,7 +964,7 @@ class Evaluator:
         table.add_column("Avg Latency")
 
         with Live(table, console=self.console, refresh_per_second=2) as live:
-            for i, task in enumerate(tasks):
+            for task in tasks:
                 result = self._run_single(task, run_path, tests_to_run, logger)
                 results.append(result)
 
@@ -1164,12 +1153,12 @@ class Evaluator:
 
         # Save messages (for fine-tuning)
         messages_path = result_dir / "messages.json"
-        with open(messages_path, "w", encoding="utf-8") as f:
+        with messages_path.open("w", encoding="utf-8") as f:
             json.dump(messages, f, indent=2)
 
         # Save test results
         results_path = result_dir / "test_results.json"
-        with open(results_path, "w", encoding="utf-8") as f:
+        with results_path.open("w", encoding="utf-8") as f:
             json.dump(result, f, indent=2)
 
     def _generate_summary(self, all_results: list[dict], config: dict) -> dict:
@@ -1368,7 +1357,7 @@ class Evaluator:
                 summary["totals"]["overall_pass_count"] / eligible_total
             )
 
-        for model, m in summary["by_model"].items():
+        for m in summary["by_model"].values():
             if m["eligible"] > 0:
                 m["pass_rate"] = m["passed"] / m["eligible"]
             if m["successful_latency_count"]:
@@ -1380,11 +1369,11 @@ class Evaluator:
                 / summary["totals"]["successful_latency_count"]
             )
 
-        for root, r in summary["by_root"].items():
+        for r in summary["by_root"].values():
             if r["eligible"] > 0:
                 r["pass_rate"] = r["passed"] / r["eligible"]
 
-        for scale, s in summary["by_scale"].items():
+        for s in summary["by_scale"].values():
             if s["eligible"] > 0:
                 s["pass_rate"] = s["passed"] / s["eligible"]
 
@@ -1414,7 +1403,7 @@ class Evaluator:
 
     def _create_run_directory(self, run_name: str) -> tuple[Path, str, str]:
         """Create a collision-resistant directory and return its authoritative metadata."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         run_id = f"{timestamp}_{self._sanitize_filename(run_name, max_len=32)}_{uuid4().hex[:16]}"
         run_path = self.output_dir / run_id
         run_path.mkdir(parents=True, exist_ok=False)
@@ -1448,8 +1437,8 @@ def main() -> None:
     if not confirm_direct_evaluation():
         raise SystemExit(1)
 
-    eval = Evaluator(output_dir="runs", temperature=0.0)
-    eval.evaluate(
+    evaluator = Evaluator(output_dir="runs", temperature=0.0)
+    evaluator.evaluate(
         prompts=[
             "An arpeggiator in only quarter notes",
             "An arpeggiator in only eighth notes",
