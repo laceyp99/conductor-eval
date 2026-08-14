@@ -20,6 +20,7 @@ from typing import Union
 from uuid import uuid4
 
 from conductor_core import EngineConfig, GenerationRequest, LoopGenerationEngine
+from conductor_core.errors import ProviderRateLimitError
 from conductor_core.music import DURATION_KEYWORDS, get_model_info
 from conductor_core.providers import ollama as ollama_api
 from mido import MidiFile
@@ -36,6 +37,7 @@ from conductor_eval.checks import (
     polyphony_test,
     scale_test,
 )
+from conductor_eval.outcomes import get_overall_status
 from conductor_eval.paths import get_evaluations_dir
 
 DIRECT_EVALUATION_CONFIRMATION = "RUN CLOUD EVALUATION"
@@ -131,6 +133,7 @@ class Evaluator:
     """
 
     SCALES = ["major", "minor"]
+    MAX_CLOUD_CONCURRENCY = 4
 
     AVAILABLE_TESTS = {
         "scale": scale_test,
@@ -230,6 +233,7 @@ class Evaluator:
         tests: list[str] = ["scale", "duration"],
         test_reasoning: bool = False,
         test_params: dict[str, dict] | None = None,
+        max_cloud_concurrency: int = MAX_CLOUD_CONCURRENCY,
     ) -> dict:
         """
         Run evaluation across all specified combinations.
@@ -244,6 +248,7 @@ class Evaluator:
             test_reasoning: If True, test all thinking modes and effort levels for compatible models.
             test_params: Explicit keyword arguments for named tests. Duration parameters override
                          prompt detection; omitted duration parameters still use keyword detection.
+            max_cloud_concurrency: Maximum simultaneous requests to each cloud provider.
 
         Returns:
             dict: Summary of evaluation results.
@@ -253,6 +258,12 @@ class Evaluator:
         """
         if run_name is None:
             raise ValueError("run_name is required")
+        if (
+            isinstance(max_cloud_concurrency, bool)
+            or not isinstance(max_cloud_concurrency, int)
+            or max_cloud_concurrency <= 0
+        ):
+            raise ValueError("max_cloud_concurrency must be a positive integer")
 
         tests = self._with_required_scale_test(tests)
         test_params = self._validate_test_params(tests, test_params)
@@ -281,6 +292,7 @@ class Evaluator:
                 "test_params": test_params,
                 "test_reasoning": test_reasoning,
                 "temperature": self.temperature,
+                "max_cloud_concurrency": max_cloud_concurrency,
             }
             with open(run_path / "config.json", "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
@@ -305,7 +317,13 @@ class Evaluator:
             # Run async tasks (cloud providers)
             if async_tasks:
                 async_results = asyncio.run(
-                    self._run_async_batch(async_tasks, run_path, tests, logger)
+                    self._run_async_batch(
+                        async_tasks,
+                        run_path,
+                        tests,
+                        logger,
+                        max_cloud_concurrency,
+                    )
                 )
                 all_results.extend(async_results)
 
@@ -820,9 +838,10 @@ class Evaluator:
         run_path: Path,
         tests_to_run: list[str],
         logger: logging.Logger,
+        max_cloud_concurrency: int = MAX_CLOUD_CONCURRENCY,
     ) -> list[dict]:
         """
-        Run tasks asynchronously with rate limiting.
+        Run cloud tasks with an independent concurrency cap for each provider.
 
         Args:
             tasks: List of task dictionaries
@@ -832,17 +851,8 @@ class Evaluator:
         Returns:
             list: List of result dictionaries
         """
-        # Build semaphores from RPM
-        semaphores = {}
-        for provider in ["OpenAI", "Anthropic", "Google"]:
-            if provider in self.model_info["models"]:
-                rpms = []
-                for model in self.model_info["models"][provider].keys():
-                    rate_info = self.model_info["models"][provider][model].get("rate_limits", {})
-                    rpm = rate_info.get("RPM", 60)
-                    rpms.append(rpm)
-                max_concurrent = max(1, min(rpms) // 60) if rpms else 1
-                semaphores[provider] = asyncio.Semaphore(max_concurrent)
+        providers = {task["provider"] for task in tasks}
+        semaphores = {provider: asyncio.Semaphore(max_cloud_concurrency) for provider in providers}
 
         results = []
         total_tasks = len(tasks)
@@ -859,7 +869,7 @@ class Evaluator:
 
         async def run_single_task(task: dict) -> dict:
             provider = task["provider"]
-            async with semaphores.get(provider, asyncio.Semaphore(1)):
+            async with semaphores[provider]:
                 return await asyncio.to_thread(
                     self._run_single,
                     task=task,
@@ -1103,7 +1113,9 @@ class Evaluator:
             )
             result["error"] = str(e)
             result["tests"]["overall_pass"] = False
-            result["tests"]["overall_status"] = "generation_error"
+            result["tests"]["overall_status"] = (
+                "rate_limited" if isinstance(e, ProviderRateLimitError) else "generation_error"
+            )
             # Still save the result even on failure
             self._save_results(result, None, [], run_path, task)
             return result
@@ -1179,6 +1191,7 @@ class Evaluator:
                 "successful_generations": 0,
                 "failed_generations": 0,
                 "generation_error_generations": 0,
+                "rate_limited_generations": 0,
                 "check_error_generations": 0,
                 "validation_failed_generations": 0,
                 "ineligible_generations": 0,
@@ -1199,18 +1212,15 @@ class Evaluator:
         }
 
         for r in all_results:
-            tests = r.get("tests", {})
-            if r.get("error"):
-                outcome = "generation_error"
-            else:
-                outcome = tests.get(
-                    "overall_status", "passed" if tests.get("overall_pass", False) else "failed"
-                )
+            outcome = get_overall_status(r)
 
             # Totals
             if r.get("error"):
                 summary["totals"]["failed_generations"] += 1
-                summary["totals"]["generation_error_generations"] += 1
+                if outcome == "rate_limited":
+                    summary["totals"]["rate_limited_generations"] += 1
+                else:
+                    summary["totals"]["generation_error_generations"] += 1
             else:
                 summary["totals"]["successful_generations"] += 1
 
@@ -1251,6 +1261,7 @@ class Evaluator:
                     "passed": 0,
                     "failed": 0,
                     "generation_errors": 0,
+                    "rate_limited": 0,
                     "check_errors": 0,
                     "validation_failed": 0,
                     "ineligible": 0,
@@ -1269,7 +1280,10 @@ class Evaluator:
                 m["passed"] += 1
             if r.get("error"):
                 m["failed"] += 1
-                m["generation_errors"] += 1
+                if outcome == "rate_limited":
+                    m["rate_limited"] += 1
+                else:
+                    m["generation_errors"] += 1
             elif outcome == "failed":
                 m["validation_failed"] += 1
             elif outcome == "ineligible":
@@ -1295,6 +1309,7 @@ class Evaluator:
                     "passed": 0,
                     "validation_failed": 0,
                     "generation_errors": 0,
+                    "rate_limited": 0,
                     "check_errors": 0,
                     "ineligible": 0,
                     "eligible": 0,
@@ -1307,6 +1322,8 @@ class Evaluator:
                 summary["by_root"][root]["validation_failed"] += 1
             elif outcome == "generation_error":
                 summary["by_root"][root]["generation_errors"] += 1
+            elif outcome == "rate_limited":
+                summary["by_root"][root]["rate_limited"] += 1
             elif outcome == "ineligible":
                 summary["by_root"][root]["ineligible"] += 1
             elif outcome == "check_error":
@@ -1322,6 +1339,7 @@ class Evaluator:
                     "passed": 0,
                     "validation_failed": 0,
                     "generation_errors": 0,
+                    "rate_limited": 0,
                     "check_errors": 0,
                     "ineligible": 0,
                     "eligible": 0,
@@ -1334,6 +1352,8 @@ class Evaluator:
                 summary["by_scale"][scale]["validation_failed"] += 1
             elif outcome == "generation_error":
                 summary["by_scale"][scale]["generation_errors"] += 1
+            elif outcome == "rate_limited":
+                summary["by_scale"][scale]["rate_limited"] += 1
             elif outcome == "ineligible":
                 summary["by_scale"][scale]["ineligible"] += 1
             elif outcome == "check_error":

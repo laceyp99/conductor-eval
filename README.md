@@ -334,7 +334,8 @@ Aggregated statistics for the entire run:
         "total_generations": 48,
         "successful_generations": 45,
         "failed_generations": 3,
-        "generation_error_generations": 3,
+        "generation_error_generations": 2,
+        "rate_limited_generations": 1,
         "check_error_generations": 0,
         "validation_failed_generations": 6,
         "ineligible_generations": 3,
@@ -409,9 +410,9 @@ Individual results for each generation:
 ```
 
 Overall pass rates use only eligible results as their denominator. Each result persists
-an `overall_status` of `passed`, `failed`, `ineligible`, `generation_error`, or
-`check_error`. A check with no examined notes is ineligible and can never make
-`overall_pass` true. A checker exception is a `check_error`, is excluded from pass-rate
+an `overall_status` of `passed`, `failed`, `ineligible`, `generation_error`,
+`rate_limited`, or `check_error`. A check with no examined notes is ineligible and can never
+make `overall_pass` true. A checker exception is a `check_error`, is excluded from pass-rate
 denominators, and is reported separately from a musical validation failure.
 
 
@@ -494,7 +495,13 @@ The evaluator continues on failures, logging errors and saving partial results:
 
 ## Performance Notes
 
-- **Cloud providers** run asynchronously with rate limiting based on RPM from `model_list.json`
+- **Cloud providers** run asynchronously with at most four concurrent requests per provider by
+  default. Set `max_cloud_concurrency` on `evaluate()` to adjust this cap. This is a concurrency
+  guard, not a request-rate limiter, and it does not guarantee compliance with RPM, TPM, or RPD
+  quotas. Provider SDK retry behavior varies and is not guaranteed by Eval. Reduce
+  `max_cloud_concurrency` or split work into smaller evaluations when using lower account limits or
+  running expensive workloads. Persistent provider throttling is recorded as `rate_limited`
+  rather than hidden as a generation failure.
 - **Ollama** runs synchronously, sorted by model to minimize GPU memory swaps
 - A live Rich progress table displays during evaluation with per-model pass rates, latency, and cost
 - Large evaluations (many models x many prompts x many roots) can take significant time and incur API costs

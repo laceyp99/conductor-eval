@@ -5,6 +5,7 @@ import pandas as pd
 
 from conductor_eval.analysis import (
     _build_combined_html,
+    _format_pass_rate_summary,
     _overall_pass_rate_percent,
     build_chord_performance_by_model,
     build_cost_by_model,
@@ -26,6 +27,30 @@ from conductor_eval.analysis import (
     compute_text_positions,
     load_run,
 )
+
+
+def test_format_pass_rate_summary_uses_compact_outcome_text():
+    assert _format_pass_rate_summary(4, 8, []) == (
+        "50.0%",
+        "4 / 8 eligible passed",
+        "No generation errors",
+        "#2ecc71",
+    )
+    assert _format_pass_rate_summary(0, 0, [("generation_error", 1)]) == (
+        "N/A",
+        "No eligible generations",
+        "1 generation error",
+        "#5dade2",
+    )
+    assert _format_pass_rate_summary(1, 4, [("rate_limited", 2)])[:3] == (
+        "25.0%",
+        "1 / 4 eligible passed",
+        "2 rate limited",
+    )
+    assert (
+        _format_pass_rate_summary(1, 2, [("ineligible", 2), ("check_error", 1)])[2]
+        == "3 run exceptions"
+    )
 
 
 def test_metric_charts_exclude_unknown_costs_and_failed_latencies():
@@ -381,6 +406,18 @@ def test_load_run_excludes_check_errors_from_overall_pass_rates(tmp_path):
     row = df.iloc[0]
 
     assert row["overall_status"] == "check_error"
+    assert row["overall_pass"] is None
+    assert not row["overall_eligible"]
+    assert not build_pass_rate_by_model(df).data
+
+
+def test_load_run_preserves_rate_limited_outcome(tmp_path):
+    run_path = _write_run(tmp_path, {"overall_status": "rate_limited"})
+
+    df, _, _ = load_run(run_path)
+    row = df.iloc[0]
+
+    assert row["overall_status"] == "rate_limited"
     assert row["overall_pass"] is None
     assert not row["overall_eligible"]
     assert not build_pass_rate_by_model(df).data
