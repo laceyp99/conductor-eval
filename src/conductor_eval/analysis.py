@@ -2107,7 +2107,7 @@ def build_reasoning_toggle_comparison(df):
             orientation="h",
             text=[f"{v}s" for v in std_latencies],
             textposition="auto",
-            customdata=list(zip(std_counts)),
+            customdata=list(zip(std_counts, strict=False)),
             hovertemplate=(
                 "Model: %{y}<br>Mode: Standard<br>Average latency: %{x:.1f}s<br>"
                 "Generations: %{customdata[0]}<extra></extra>"
@@ -2125,7 +2125,7 @@ def build_reasoning_toggle_comparison(df):
             orientation="h",
             text=[f"{v}s" for v in reas_latencies],
             textposition="auto",
-            customdata=list(zip(reas_counts)),
+            customdata=list(zip(reas_counts, strict=False)),
             hovertemplate=(
                 "Model: %{y}<br>Mode: Reasoning<br>Average latency: %{x:.1f}s<br>"
                 "Generations: %{customdata[0]}<extra></extra>"
@@ -2144,7 +2144,7 @@ def build_reasoning_toggle_comparison(df):
             orientation="h",
             text=[f"${v:.5f}" for v in std_costs],
             textposition="auto",
-            customdata=list(zip(std_counts)),
+            customdata=list(zip(std_counts, strict=False)),
             hovertemplate=(
                 "Model: %{y}<br>Mode: Standard<br>Average cost: $%{x:.5f}<br>"
                 "Generations: %{customdata[0]}<extra></extra>"
@@ -2162,7 +2162,7 @@ def build_reasoning_toggle_comparison(df):
             orientation="h",
             text=[f"${v:.5f}" for v in reas_costs],
             textposition="auto",
-            customdata=list(zip(reas_counts)),
+            customdata=list(zip(reas_counts, strict=False)),
             hovertemplate=(
                 "Model: %{y}<br>Mode: Reasoning<br>Average cost: $%{x:.5f}<br>"
                 "Generations: %{customdata[0]}<extra></extra>"
