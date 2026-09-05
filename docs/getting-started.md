@@ -8,14 +8,16 @@ safeguards around direct execution.
 ### Develop with uv
 
 Eval uses [uv](https://docs.astral.sh/uv/) 0.11.16 or newer for its primary
-development workflow. From the `conductor-eval` project directory, create the
+development workflow. 
+
+From the `conductor-eval` project directory, create the
 locked environment with the dashboard and development extras:
 
 ```powershell
 uv sync --locked --all-extras
 ```
 
-You do not need to activate the environment. Run the project checks with:
+Run the project checks with:
 
 ```powershell
 uv run --locked --all-extras ruff format --check .
@@ -35,16 +37,14 @@ do not use uv. On Windows, use the virtual environment's interpreter explicitly:
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e ".[dashboard,dev]"
+.\.venv\Scripts\python.exe -m pip install -e ".[dashboard,dev,docs]"
 ```
 
 Use `.\.venv\Scripts\python.exe -m pip install .` instead for a non-editable
-base installation without the dashboard or development tools.
+base installation without the dashboard, development, or docs tools.
 
 The uv lockfile does not constrain pip installations; pip resolves versions
 from the compatible ranges and pins declared in `pyproject.toml`.
-
-Key packages: `dash`, `dash-bootstrap-components`, `pandas`, `plotly`, `mido`, `rich`.
 
 ## Quick Start
 
@@ -72,12 +72,14 @@ current working directory, virtual environment, and installed package path.
 Running `uv run --locked --all-extras python -m conductor_eval.evaluator`
 directly is guarded because the
 example in that file starts a broad cloud evaluation across multiple paid
-providers. The script prints a warning and requires the exact confirmation
-phrase `RUN CLOUD EVALUATION` before it creates an `Evaluator` or starts any
-provider calls.
+providers. 
 
-Pressing Enter, sending no input, or typing anything else aborts the script
-without creating evaluation outputs. For smaller intentional runs, prefer the
+The script prints a warning and requires the exact confirmation
+phrase `RUN CLOUD EVALUATION` before it creates an `Evaluator` or starts any
+provider calls. Pressing Enter, sending no input, or typing anything else aborts the script
+without creating evaluation outputs. 
+
+For smaller intentional runs, prefer writing additional scripts utilizing the
 Python API examples above so you can choose the prompts, roots, models, and run
 name explicitly.
 
@@ -124,6 +126,6 @@ continue portable or legacy operation.
 
 Evaluation data can be large because every run retains Core generation
 artifacts and also copies report MIDI and messages; dashboard exports add HTML
-files. Storage grows with prompts × roots × two scales × model variants. Review
+files. Storage grows with `prompts × roots × two scales × model variants`. Review
 and remove complete, unneeded runs manually; Eval performs no automatic
 migration or cleanup.

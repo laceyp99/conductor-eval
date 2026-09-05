@@ -1,30 +1,25 @@
 # Analysis
 
 The optional Plotly Dash dashboard reads saved evaluation runs; it does not
-perform generation. Install the dashboard extra before launching it.
+perform generation. 
 
-```mermaid
-flowchart TD
-    run[Saved evaluation run] --> load[Load JSON results]
-    load --> filters[Global filters]
-    filters --> views[Dashboard views]
-    views --> charts[Charts and tables]
-    charts --> export[Optional HTML export]
-```
+> **Reminder: **Install the dashboard extra before launching it.
 
 ## Launch the Dashboard
 
+To trigger an interactive run selection:
 ```powershell
-# Interactive run selection
 uv run --locked --all-extras python -m conductor_eval.analysis
-
-# Direct path to a run
-uv run --locked --all-extras python -m conductor_eval.analysis "$HOME\.conductor\eval\evaluations\20260210_224954_arpeggiator_local"
 ```
 
-The dashboard opens at `http://127.0.0.1:8050/`. Pip users can run the same
-module with `.\.venv\Scripts\python.exe` instead of the `uv run ... python`
-prefix.
+To kickoff with a direct path to a run:
+```powershell
+uv run --locked --all-extras python -m conductor_eval.analysis "$HOME\.conductor\eval\evaluations\20260210_224954_arpeggiator_local"
+```
+Pip users can run the same module with `.\.venv\Scripts\python.exe` 
+instead of the `uv run ... python` prefix.
+
+The dashboard opens at [http://127.0.0.1:8050/](http://127.0.0.1:8050/). 
 
 ## Dashboard
 
@@ -77,7 +72,9 @@ All charts update in real time when filters change.
 
 ## Exporting
 
-Click the **Export Dashboard** button to save all charts as individual HTML files plus a combined `dashboard.html` to `<evaluations-dir>/<run>/analysis/`. The number of exported charts depends on the run's features (16 base charts, plus 3 for reasoning when applicable):
+Click the **Export Dashboard** button to save all charts as individual HTML files plus a combined `dashboard.html` to `<evaluations-dir>/<run>/analysis/`. 
+
+The number of exported charts depends on the run's features (16 base charts, plus 3 for reasoning when applicable):
 
 ```
 ~/.conductor/eval/evaluations/20260210_224954_arpeggiator_local/

@@ -24,6 +24,8 @@ After installing the documentation tools, preview the site with:
 uv run --group docs mkdocs serve
 ```
 
+The documentation opens at [http://127.0.0.1:8000/](http://127.0.0.1:8000/). 
+
 Build it without starting a server:
 
 ```powershell
@@ -55,12 +57,15 @@ The evaluator continues on failures, logging errors and saving partial results:
 ## Performance Notes
 
 - **Cloud providers** run asynchronously with at most four concurrent requests per provider by
-  default. Set `max_cloud_concurrency` on `evaluate()` to adjust this cap. This is a concurrency
-  guard, not a request-rate limiter, and it does not guarantee compliance with RPM, TPM, or RPD
-  quotas. Provider SDK retry behavior varies and is not guaranteed by Eval. Reduce
+  default. 
+    - Set `max_cloud_concurrency` on `evaluate()` to adjust this cap. 
+    - This is a concurrency guard, not a request-rate limiter, and it does not guarantee compliance with RPM, TPM, or RPD
+  quotas. 
+    - Reduce
   `max_cloud_concurrency` or split work into smaller evaluations when using lower account limits or
-  running expensive workloads. Persistent provider throttling is recorded as `rate_limited`
+  running expensive workloads. 
+    - Persistent provider throttling is recorded as `rate_limited`
   rather than hidden as a generation failure.
 - **Ollama** runs synchronously, sorted by model to minimize GPU memory swaps
-- A live Rich progress table displays during evaluation with per-model pass rates, latency, and cost
+- A live **Rich** progress table displays during evaluation with per-model pass rates, latency, and cost
 - Large evaluations (many models x many prompts x many roots) can take significant time and incur API costs

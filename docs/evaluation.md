@@ -124,11 +124,11 @@ directory (shown here with the default suite root):
 ```
 ~/.conductor/eval/evaluations/
 └── 20260210_224954_123456_my_first_eval-<hash>_<uuid16>/
-    ├── run.log                        # Eval-owned lifecycle and error log
-    ├── config.json                    # Full evaluation configuration
-    ├── summary.json                   # Aggregated results + statistics
-    ├── core_artifacts/                # Core-owned MIDI, messages, and metadata
-    ├── analysis/                      # Created by dashboard export
+    ├── run.log                    # Eval-owned lifecycle and error log
+    ├── config.json                # Full evaluation configuration
+    ├── summary.json               # Aggregated results + statistics
+    ├── core_artifacts/            # Core-owned MIDI, messages, and metadata
+    ├── analysis/                  # Created by dashboard export
     │   └── dashboard.html
     └── results/
         └── task-an_arpeggiator_using-<fingerprint>-1/
@@ -136,25 +136,6 @@ directory (shown here with the default suite root):
             ├── messages.json      # Chat history (for fine-tuning)
             └── test_results.json  # Individual test results and task metadata
 ```
-
-The evaluator intentionally retains `core_artifacts/` after copying MIDI and
-messages into the report-oriented `results/` tree. Core owns generation
-persistence, and retaining its canonical artifacts preserves provenance and
-provider metadata for debugging. Eval does not selectively delete those files;
-remove an entire completed run externally when its artifacts are no longer
-needed.
-
-Run directories include microseconds, a hash-backed 32-character run-name
-component, and a 16-character UUID suffix. Each result is stored directly
-beneath `results/` in a directory named
-`task-<32-character sanitized prompt>-<16-character fingerprint>-<occurrence>`.
-The fingerprint covers all task inputs and the occurrence always starts at
-`1`, so repeated tasks remain distinct. A run or task directory collision
-fails instead of overwriting artifacts. Result JSON metadata is authoritative;
-the analysis loader does not infer meaning from directory names. Each run owns
-one non-propagating `run.log`, which records run start and completion plus
-contextual task and run failures. Eval does not capture prompts, provider
-payloads, or host/root logger output.
 
 When using `test_reasoning`, each variation receives its own task directory;
 the variation is recorded in `test_results.json` rather than a subfolder:
@@ -169,7 +150,36 @@ results/
 └── task-an_arpeggiator_using-<fingerprint-xhigh>-1/   # variation: xhigh
 ```
 
-### config.json
+### Core Artifacts
+The evaluator intentionally retains `core_artifacts/` after copying MIDI and
+messages into the report-oriented `results/` tree. Core owns generation
+persistence, and retaining its canonical artifacts preserves provenance and
+provider metadata for debugging. Eval does not selectively delete those files;
+remove an entire completed run externally when its artifacts are no longer
+needed.
+
+### Directory Naming
+Run directories include microseconds, a hash-backed 32-character run-name
+component, and a 16-character UUID suffix. Each result is stored directly
+beneath `results/` in a directory named:
+
+```
+task-<32-character sanitized prompt>-<16-character fingerprint>-<occurrence>
+```
+
+The fingerprint covers all task inputs and the occurrence always starts at
+`1`, so repeated tasks remain distinct. A run or task directory collision
+fails instead of overwriting artifacts. Result JSON metadata is authoritative;
+the analysis loader does not infer meaning from directory names. 
+
+### Logging
+Each run owns
+one non-propagating `run.log`, which records run start and completion plus
+contextual task and run failures. Eval does not capture prompts, provider
+payloads, or host/root logger output.
+
+### Example JSON Schemas
+#### config.json
 
 Stores the full configuration used for the run:
 
@@ -188,7 +198,7 @@ Stores the full configuration used for the run:
 }
 ```
 
-### summary.json
+#### summary.json
 
 Aggregated statistics for the entire run:
 
@@ -225,7 +235,7 @@ Aggregated statistics for the entire run:
 }
 ```
 
-### test_results.json
+#### test_results.json
 
 Individual results for each generation:
 
@@ -273,9 +283,11 @@ Individual results for each generation:
     }
 }
 ```
+### Overall Pass
 
 Overall pass rates use only eligible results as their denominator. Each result persists
 an `overall_status` of `passed`, `failed`, `ineligible`, `generation_error`,
-`rate_limited`, or `check_error`. A check with no examined notes is ineligible and can never
-make `overall_pass` true. A checker exception is a `check_error`, is excluded from pass-rate
+`rate_limited`, or `check_error`. 
+
+A check with no examined notes is ineligible and can never make `overall_pass` true. A checker exception is a `check_error`, is excluded from pass-rate
 denominators, and is reported separately from a musical validation failure.
