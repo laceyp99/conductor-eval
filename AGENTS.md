@@ -69,6 +69,6 @@ evaluation and reporting, and the dashboard consumes saved evaluation data.
 
 ## Validation
 
-See the [README installation section](README.md#installation) for environment
-setup and the [README testing section](README.md#configuring-tests) for
+See the [documentation installation section](docs/reference.md#installation)
+for environment setup and the [evaluation guide](docs/evaluation.md) for
 evaluation-specific usage.
